@@ -57,8 +57,8 @@ export class HTMLGenerator {
       includeAllRequests: options.includeAllRequests || false,
     });
 
-    // Use split() instead of replace() — replace duplicates the haystack inside large
-    // injections. Same workaround the upstream tool uses (see comment in their source).
+    // split() rather than replace(): replace() duplicates the haystack inside
+    // very large injections (the bundle is ~800 KB).
     const parts = htmlTemplate.split(BUNDLE_MARKER);
     if (parts.length !== 2) {
       throw new Error("Template bundle marker not found");

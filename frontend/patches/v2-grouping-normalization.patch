@@ -1,7 +1,6 @@
-diff --git a/apps/claude-trace/src/shared-conversation-processor.ts b/apps/claude-trace/src/shared-conversation-processor.ts
-index 1415a98..237dcbe 100644
---- a/apps/claude-trace/src/shared-conversation-processor.ts
-+++ b/apps/claude-trace/src/shared-conversation-processor.ts
+diff --git a/frontend/shared-conversation-processor.ts b/frontend/shared-conversation-processor.ts
+--- a/frontend/shared-conversation-processor.ts
++++ b/frontend/shared-conversation-processor.ts
 @@ -499,7 +499,7 @@ export class SharedConversationProcessor {
          for (const pair of pairs) {
              const system = pair.request.system;

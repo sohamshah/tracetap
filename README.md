@@ -1,6 +1,6 @@
 # claude-trace-v2
 
-Record every API call your **Claude Code v2** session makes to Anthropic — request bodies, system prompts, tool definitions, streaming responses, token usage — into a JSONL log and a self-contained HTML viewer. Drop-in compatible with the file format that [`@mariozechner/claude-trace`](https://github.com/badlogic/lemmy/tree/main/apps/claude-trace) produced for the v1 CLI, but written for the new native binary.
+Record every API call your **Claude Code v2** session makes to Anthropic — request bodies, system prompts, tool definitions, streaming responses, token usage — into a JSONL log and a self-contained HTML viewer.
 
 ```
 $ claude-trace-v2
@@ -24,9 +24,7 @@ Opened /your/cwd/.claude-trace/log-2026-05-05-22-50-32.html
 
 ## Why this exists
 
-The original [`@mariozechner/claude-trace`](https://github.com/badlogic/lemmy) is excellent. It hooks Claude Code by spawning `node --require <interceptor.js> <claude.js>` — a Node loader patches `global.fetch` and the `http`/`https` modules, then logs every request bound for `api.anthropic.com`.
-
-Anthropic's `@anthropic-ai/claude-code` package switched to a precompiled native single-binary release in v2.x. The shipped artifact is now a Mach-O / ELF executable named `claude.exe` (yes, even on macOS), not a JavaScript file. Trying to `node --require` it fails immediately:
+`@anthropic-ai/claude-code` switched to a precompiled native single-binary release in v2.x. The shipped artifact is a Mach-O / ELF executable named `claude.exe` (yes, even on macOS), not a JavaScript file. Older Node-loader-based traffic loggers fail immediately when pointed at it:
 
 ```
 Uncaught exception: TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".exe"
@@ -143,15 +141,14 @@ claude-trace-v2 --no-open
 # Re-render an existing JSONL into HTML (e.g., from a coworker's bug report)
 claude-trace-v2 --generate-html .claude-trace/log-2026-05-05.jsonl
 
-# Point at a non-default upstream (e.g., a staging endpoint or another
-# OpenAI-compatible Anthropic gateway)
+# Point at a non-default upstream (e.g., a staging endpoint)
 claude-trace-v2 --upstream https://api.staging.anthropic.com
 
 # Override claude binary discovery
 claude-trace-v2 --claude /custom/path/to/claude
 ```
 
-Output lands in `./.claude-trace/<basename>.{jsonl,html}` — the same path layout the original tool used, so any tooling that already reads those files keeps working.
+Output lands in `./.claude-trace/<basename>.{jsonl,html}`.
 
 ## CLI reference
 
@@ -168,25 +165,15 @@ Output lands in `./.claude-trace/<basename>.{jsonl,html}` — the same path layo
 
 ---
 
-## Frontend viewer
+## Conversation grouping
 
-The HTML viewer (`frontend/`) is built from the upstream MIT-licensed bundle from `mariozechner/lemmy/apps/claude-trace`. It groups raw request/response pairs into "conversations" and renders them as readable Claude transcripts: USER and ASSISTANT turns with system prompts, tools, and `<system-reminder>`s collapsible.
-
-### The grouping fix
-
-There's one local patch baked into our vendored bundle (`frontend/patches/v2-grouping-normalization.patch`).
-
-**Symptom:** running upstream's viewer on a v2 trace produced a list of N "Compacted (click to view details)" rows where N was the number of API calls — every call appeared as its own collapsed conversation.
-
-**Root cause:** the upstream conversation processor groups pairs by hashing `JSON.stringify({system, model})`. Claude Code v2 stamps two volatile fields into the system field that change on every call:
+The viewer groups raw request/response pairs into "conversations" by hashing each request's `system` and `model`, then merging by first user message. Claude Code v2 stamps two volatile fields into the system field that change on every call:
 
 1. A per-call cache hash in the billing-header system block:
    `x-anthropic-billing-header: cc_version=…; cc_entrypoint=cli; cch=7f0d1;` → `cch=34c8e;` next call.
-2. `cache_control` toggles between `{"type":"ephemeral"}` and `{"type":"ephemeral","ttl":"1h"}` between calls as the SDK decides which blocks to promote to the 1-hour cache tier.
+2. `cache_control` toggles between `{"type":"ephemeral"}` and `{"type":"ephemeral","ttl":"1h"}` between calls.
 
-So the same conversation hashed to a different group every turn → no merging → upstream's compaction-detection heuristic flagged each as "Compacted". Our patch normalizes `cch=<hex>;` to `cch=[HASH];` and ignores `cache_control` for *grouping purposes only* — the rendered content is unchanged. See `frontend/patches/v2-grouping-normalization.patch`.
-
-If upstream eventually accepts a similar fix you can drop the patch and rebuild against their newer bundle. Until then, the patched bundle ships pre-built in `frontend/dist/index.global.js` and the patch is preserved as a textual artifact so anyone can reapply it on a future upstream rebase.
+Without normalization, the same conversation hashes to a different group every turn → no merging → every call appears as its own collapsed "Compacted" row in the viewer. Our viewer normalizes `cch=<hex>;` to `cch=[HASH];` and ignores `cache_control` for *grouping purposes only* — the rendered content is unchanged. The textual diff lives at `frontend/patches/v2-grouping-normalization.patch` for reference.
 
 ---
 
@@ -217,12 +204,11 @@ claude-trace-v2/
 │   │                      coalesced HTML re-render.
 │   ├── html-generator.ts  injects the captured pairs into the viewer template
 │   │                      using base64 to dodge HTML/JSON-in-string escaping.
-│   └── types.ts           shared shapes — wire-compatible with upstream.
+│   └── types.ts           shared shapes for request/response pairs.
 └── frontend/
     ├── template.html      tiny shell with three replacement markers
     ├── dist/
-    │   └── index.global.js   ~810 KB IIFE bundle of upstream Lit-based viewer
-    │                         (with v2 grouping patch applied)
+    │   └── index.global.js   ~810 KB IIFE bundle of the Lit-based viewer
     └── patches/
         └── v2-grouping-normalization.patch
 ```
@@ -254,10 +240,9 @@ A vanilla `http.createServer` on `127.0.0.1:0` (port 0 = OS-assigned). Per reque
 npm install
 npm run build         # compile src → dist
 npm run typecheck     # tsc --noEmit, no output
-npm run test:html     # if you have test/sample.jsonl, render it
 ```
 
-The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-built at `frontend/dist/index.global.js`; rebuilding it requires cloning [`mariozechner/lemmy`](https://github.com/badlogic/lemmy), applying `frontend/patches/v2-grouping-normalization.patch` against `apps/claude-trace/src/shared-conversation-processor.ts`, then running `npm run build` inside `apps/claude-trace/frontend`. The 800-ish KB bundle that drops out of `dist/index.global.js` is what we ship.
+The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-built at `frontend/dist/index.global.js`.
 
 ---
 
@@ -277,27 +262,11 @@ The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-bu
 
 **`claude binary not found`** — `which claude` returned nothing and `~/.claude/local/claude` doesn't exist. Install Claude Code first (`npm i -g @anthropic-ai/claude-code`) or pass `--claude /path/to/claude`.
 
-**Conversations all show as "Compacted (click to view details)"** — you have an old vendored bundle from before the v2 grouping patch. Pull latest, run `npm run build`, and re-render with `--generate-html <your-old.jsonl>`.
+**Conversations all show as "Compacted (click to view details)"** — you have an old vendored bundle from before the v2 grouping fix. Pull latest, run `npm run build`, and re-render with `--generate-html <your-old.jsonl>`.
 
 **No pairs logged** — check that the child process actually picked up `ANTHROPIC_BASE_URL`. If you have a wrapper script for `claude` that scrubs env, point at the real binary with `--claude`.
 
 **JSONL has only orphaned requests** — the upstream connection terminated before a response arrived. Usually means a request/auth error; check the next pair (or use `--include-all-requests`) to see why.
-
----
-
-## Comparison with upstream
-
-|                                  | upstream `@mariozechner/claude-trace` (1.0.x) | this                                  |
-| -------------------------------- | --------------------------------------------- | ------------------------------------- |
-| Hook                             | `node --require` interceptor on `fetch`       | local HTTP proxy via `ANTHROPIC_BASE_URL` |
-| Works with claude-code v1 (JS)   | ✅                                            | ❌ (use upstream)                     |
-| Works with claude-code v2 (binary) | ❌                                          | ✅                                    |
-| TLS mitm / CA install            | n/a                                           | n/a                                   |
-| JSONL / HTML format              | ✅                                            | ✅ (drop-in compatible)               |
-| Conversation grouping for v2     | broken (every call is its own "Compacted" row) | fixed (frontend patch)              |
-| Token extraction (`--extract-token`) | ✅                                        | not yet                               |
-| Bedrock / Vertex backends        | partial                                       | no                                    |
-| Index generation (`--index`)     | ✅                                            | not yet                               |
 
 ---
 
@@ -306,8 +275,7 @@ The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-bu
 PRs welcome. The surface area is small:
 
 - `src/proxy.ts` is the only piece that talks to anything external — keep it simple, keep it streaming.
-- The frontend bundle is upstream's; if you want to fix viewer behavior, send PRs upstream where possible and only carry a patch here when there's a v2-specific reason (like the grouping fix).
-- New CLI flags should match upstream's flag names where they overlap (`--include-all-requests`, `--no-open`, `--log`, `--generate-html`) so people switching between the two tools don't have to retrain their muscle memory.
+- New CLI flags should match conventional names where they overlap (`--include-all-requests`, `--no-open`, `--log`, `--generate-html`).
 
 If you find a Claude Code header / env var / wire change that breaks logging, please open an issue with a redacted JSONL fragment so the regression can be reproduced.
 
@@ -316,5 +284,3 @@ If you find a Claude Code header / env var / wire change that breaks logging, pl
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
-
-The vendored bundle in `frontend/dist/` is rebuilt from [`mariozechner/lemmy`](https://github.com/badlogic/lemmy) (MIT, Copyright 2024 Mario Zechner) with the v2 grouping patch applied.

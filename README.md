@@ -14,9 +14,12 @@ That's it. Requires Node 18+ and the `claude` CLI from `@anthropic-ai/claude-cod
 
 ```bash
 claude-trace-v2                              # interactive Claude Code session, fully logged
-claude-trace-v2 --run-with -p "hello"        # one-shot prompt, fully logged
+claude-trace-v2 --resume                     # resume a previous claude session, fully logged
+claude-trace-v2 -p "hello"                   # one-shot prompt, fully logged
 claude-trace-v2 --generate-html log.jsonl    # re-render an existing log into HTML
 ```
+
+Any flag we don't recognize as a trace flag is forwarded to the underlying `claude` binary, so most `claude` invocations work just by prefixing them with `claude-trace-v2`. Use `--run-with` if a `claude` flag ever collides with one of ours.
 
 Output lands in `./.claude-trace/<basename>.{jsonl,html}` next to wherever you ran the command.
 
@@ -127,8 +130,10 @@ Every request/response pair is one JSONL line:
 ## More usage examples
 
 ```bash
-# Pass arguments through to the underlying claude binary
-claude-trace-v2 --log demo --run-with -p "summarize this repo"
+# Pass arguments through to the underlying claude binary (unknown flags
+# auto-forward; --run-with is only needed for collisions with trace flags)
+claude-trace-v2 --log demo -p "summarize this repo"
+claude-trace-v2 --resume <session-id>
 
 # Capture every request, not just /v1/messages (default filters out
 # unrelated traffic — token-count probes, telemetry, etc.)
@@ -157,7 +162,7 @@ claude-trace-v2 --claude /custom/path/to/claude
 | `--log <name>`             | Custom log basename (no extension).                             |
 | `--claude <path>`          | Override path to the `claude` binary (default: `which claude`). |
 | `--upstream <url>`         | Override the upstream API base.                                 |
-| `--run-with <args...>`     | Pass everything after this through to `claude` verbatim.        |
+| `--run-with <args...>`     | Force everything after this through to `claude` (escape hatch for flag-name collisions; usually unnecessary since unknown flags auto-forward). |
 | `--help`, `-h`             | Show usage.                                                     |
 
 ---

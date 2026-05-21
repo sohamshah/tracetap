@@ -29,7 +29,11 @@ ${colors.blue}claude-trace-v2${colors.reset}
 Record interactions with Claude Code v2 (native binary) by proxying ANTHROPIC_BASE_URL.
 
 ${colors.yellow}USAGE:${colors.reset}
-  claude-trace-v2 [OPTIONS] [--run-with CLAUDE_ARG...]
+  claude-trace-v2 [OPTIONS] [CLAUDE_ARG...] [--run-with CLAUDE_ARG...]
+
+  Any flag not listed below is forwarded verbatim to the claude binary,
+  so e.g. \`claude-trace-v2 --resume\` just works. Use --run-with if a
+  claude flag collides with one of ours.
 
 ${colors.yellow}OPTIONS:${colors.reset}
   --generate-html <file.jsonl> [out.html]   Generate HTML report from a JSONL log
@@ -38,13 +42,14 @@ ${colors.yellow}OPTIONS:${colors.reset}
   --log <name>                              Custom log base name (no extension)
   --claude <path>                           Override path to the claude binary
   --upstream <url>                          Override upstream API base (default: https://api.anthropic.com)
-  --run-with <args...>                      Pass remaining args directly to claude
+  --run-with <args...>                      Force everything after this to be passed to claude
   --help, -h                                Show this help
 
 ${colors.yellow}EXAMPLES:${colors.reset}
   claude-trace-v2
-  claude-trace-v2 --include-all-requests
-  claude-trace-v2 --log my-session --run-with --model sonnet
+  claude-trace-v2 --resume
+  claude-trace-v2 --include-all-requests --resume <session-id>
+  claude-trace-v2 --log my-session --model sonnet
   claude-trace-v2 --generate-html .claude-trace/log-2026-05-05-12-00-00.jsonl
 
 ${colors.yellow}OUTPUT:${colors.reset}
@@ -216,54 +221,100 @@ async function generateHTMLFromCLI(
   }
 }
 
-function takeFlagValue(args: string[], flag: string): string | undefined {
-  const i = args.indexOf(flag);
-  if (i === -1) return undefined;
-  return args[i + 1];
+const TRACE_VALUE_FLAGS = new Set(["--log", "--claude", "--upstream"]);
+const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open"]);
+
+interface ParsedArgs {
+  trace: Record<string, string | boolean>;
+  generateHtml?: { input: string; output?: string };
+  claudeArgs: string[];
+  help: boolean;
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const trace: Record<string, string | boolean> = {};
+  const claudeArgs: string[] = [];
+  let generateHtml: ParsedArgs["generateHtml"];
+  let help = false;
+
+  const runWithIdx = argv.indexOf("--run-with");
+  const front = runWithIdx === -1 ? argv : argv.slice(0, runWithIdx);
+  const tail = runWithIdx === -1 ? [] : argv.slice(runWithIdx + 1);
+
+  for (let i = 0; i < front.length; i++) {
+    const a = front[i];
+
+    if (a === "--help" || a === "-h") {
+      help = true;
+      continue;
+    }
+
+    if (a === "--generate-html") {
+      const input = front[i + 1];
+      let output: string | undefined;
+      let consumed = 1;
+      const next = front[i + 2];
+      if (next && !next.startsWith("--")) {
+        output = next;
+        consumed = 2;
+      }
+      generateHtml = { input, output };
+      i += consumed;
+      continue;
+    }
+
+    if (TRACE_BOOL_FLAGS.has(a)) {
+      trace[a] = true;
+      continue;
+    }
+
+    if (TRACE_VALUE_FLAGS.has(a)) {
+      trace[a] = front[i + 1] ?? "";
+      i++;
+      continue;
+    }
+
+    claudeArgs.push(a);
+  }
+
+  claudeArgs.push(...tail);
+  return { trace, generateHtml, claudeArgs, help };
 }
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const parsed = parseArgs(argv);
 
-  const runWithIdx = argv.indexOf("--run-with");
-  const traceArgs = runWithIdx === -1 ? argv : argv.slice(0, runWithIdx);
-  const claudeArgs = runWithIdx === -1 ? [] : argv.slice(runWithIdx + 1);
-
-  if (traceArgs.includes("--help") || traceArgs.includes("-h")) {
+  if (parsed.help) {
     showHelp();
     process.exit(0);
   }
 
-  const includeAllRequests = traceArgs.includes("--include-all-requests");
-  const openInBrowser = !traceArgs.includes("--no-open");
-  const customClaudePath = takeFlagValue(traceArgs, "--claude");
-  const logBaseName = takeFlagValue(traceArgs, "--log");
+  const includeAllRequests = parsed.trace["--include-all-requests"] === true;
+  const openInBrowser = parsed.trace["--no-open"] !== true;
+  const customClaudePath = parsed.trace["--claude"] as string | undefined;
+  const logBaseName = parsed.trace["--log"] as string | undefined;
   const upstreamUrl =
-    takeFlagValue(traceArgs, "--upstream") ||
+    (parsed.trace["--upstream"] as string | undefined) ||
     process.env.ANTHROPIC_BASE_URL ||
     "https://api.anthropic.com";
 
-  if (traceArgs.includes("--generate-html")) {
-    const flagIdx = traceArgs.indexOf("--generate-html");
-    const inputFile = traceArgs[flagIdx + 1];
-    let outputFile: string | undefined;
-    for (let i = flagIdx + 2; i < traceArgs.length; i++) {
-      const a = traceArgs[i];
-      if (!a.startsWith("--")) {
-        outputFile = a;
-        break;
-      }
-    }
-    if (!inputFile) {
+  if (parsed.generateHtml) {
+    if (!parsed.generateHtml.input) {
       log("Missing input file for --generate-html", "red");
       process.exit(1);
     }
-    await generateHTMLFromCLI(inputFile, outputFile, includeAllRequests, openInBrowser);
+    await generateHTMLFromCLI(
+      parsed.generateHtml.input,
+      parsed.generateHtml.output,
+      includeAllRequests,
+      openInBrowser,
+    );
     return;
   }
 
   await runClaudeWithProxy({
-    claudeArgs,
+    claudeArgs: parsed.claudeArgs,
     includeAllRequests,
     openInBrowser,
     customClaudePath,

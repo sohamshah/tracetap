@@ -1,6 +1,6 @@
 {
   "name": "claude-trace-v2",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Record Claude Code v2 traffic (request bodies, system prompts, tools, streamed responses) into a JSONL log and a self-contained HTML viewer, by proxying ANTHROPIC_BASE_URL through a local HTTP server.",
   "main": "dist/index.js",
   "bin": {

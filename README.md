@@ -17,7 +17,7 @@ Supported tools today:
 
 Both are native single binaries you can't loader-patch, so `tracetap` hooks them at the network layer instead. See [Tracing Claude](#tracing-claude) and [Tracing Codex](#tracing-codex).
 
-> **Heads up — package rename.** This project was previously published as `claude-trace-v2` (Claude only). It's now `tracetap` and traces multiple agents. `claude-trace-v2` remains as a thin deprecated alias.
+> **Heads up — package rename.** This project was previously published as `claude-trace-v2` (Claude only). It's now [`tracetap`](https://www.npmjs.com/package/tracetap) and traces multiple agents. The old `claude-trace-v2` package is [deprecated on npm](https://www.npmjs.com/package/claude-trace-v2) and frozen at its last Claude-only release — `npm i -g tracetap` to get the current tool.
 
 ## Install
 

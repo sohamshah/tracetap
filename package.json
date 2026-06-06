@@ -42,11 +42,11 @@
   "author": "Soham Shah",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sohamshah/claude-trace-v2.git"
+    "url": "git+https://github.com/sohamshah/tracetap.git"
   },
-  "homepage": "https://github.com/sohamshah/claude-trace-v2#readme",
+  "homepage": "https://github.com/sohamshah/tracetap#readme",
   "bugs": {
-    "url": "https://github.com/sohamshah/claude-trace-v2/issues"
+    "url": "https://github.com/sohamshah/tracetap/issues"
   },
   "engines": {
     "node": ">=18.0.0"

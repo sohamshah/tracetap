@@ -1,13 +1,13 @@
 {
-  "name": "claude-trace-v2",
-  "version": "0.1.2",
-  "description": "Record Claude Code v2 traffic (request bodies, system prompts, tools, streamed responses) into a JSONL log and a self-contained HTML viewer, by proxying ANTHROPIC_BASE_URL through a local HTTP server.",
-  "main": "dist/index.js",
+  "name": "tracetap",
+  "version": "0.2.0",
+  "description": "Capture the full trajectory of a coding-agent harness (Claude Code, Codex) — request bodies, system prompts, tools, streamed responses, token usage — into a JSONL log and a self-contained HTML viewer, by proxying the agent's API traffic through a local HTTP server.",
+  "main": "dist/tracetap.js",
   "bin": {
-    "claude-trace-v2": "dist/cli.js"
+    "tracetap": "dist/tracetap.js"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "tsc && chmod +x dist/tracetap.js dist/claude-cli.js dist/codex-cli.js",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run clean && npm run build"
@@ -16,16 +16,23 @@
     "dist/**/*",
     "frontend/dist/**/*",
     "frontend/template.html",
+    "frontend/codex-template.html",
     "frontend/patches/**/*",
     "README.md",
     "LICENSE"
   ],
   "keywords": [
+    "tracetap",
+    "trace",
+    "trajectory",
     "claude",
     "claude-code",
     "anthropic",
+    "codex",
+    "openai",
+    "agent",
+    "coding-agent",
     "logging",
-    "trace",
     "api",
     "proxy",
     "debugging",

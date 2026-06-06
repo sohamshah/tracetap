@@ -3,11 +3,26 @@ import * as path from "path";
 import { RawPair } from "./types";
 import { HTMLGenerator } from "./html-generator";
 
+/**
+ * Minimal contract shared by the Anthropic (HTMLGenerator) and codex
+ * (CodexHTMLGenerator) renderers so TrafficLogger can drive either one.
+ */
+export interface HtmlGenerator {
+  generateHTML(
+    pairs: RawPair[],
+    outputFile: string,
+    options?: { title?: string; timestamp?: string; includeAllRequests?: boolean },
+  ): Promise<void>;
+}
+
 export interface LoggerConfig {
   logDirectory?: string;
   logBaseName?: string;
   enableRealTimeHTML?: boolean;
   includeAllRequests?: boolean;
+  // Renderer to use for the live/finalized HTML report. Defaults to the
+  // Anthropic viewer; the codex tracer injects CodexHTMLGenerator.
+  htmlGenerator?: HtmlGenerator;
 }
 
 const SENSITIVE_HEADER_KEYS = [
@@ -50,7 +65,7 @@ export class TrafficLogger {
   readonly logFile: string;
   readonly htmlFile: string;
   private readonly pairs: RawPair[] = [];
-  private readonly htmlGenerator: HTMLGenerator;
+  private readonly htmlGenerator: HtmlGenerator;
   private readonly enableRealTimeHTML: boolean;
   private readonly includeAllRequests: boolean;
   private htmlGenInFlight = false;
@@ -68,7 +83,7 @@ export class TrafficLogger {
 
     this.logFile = path.join(this.logDir, `${baseName}.jsonl`);
     this.htmlFile = path.join(this.logDir, `${baseName}.html`);
-    this.htmlGenerator = new HTMLGenerator();
+    this.htmlGenerator = config.htmlGenerator ?? new HTMLGenerator();
     this.enableRealTimeHTML = config.enableRealTimeHTML ?? true;
     this.includeAllRequests = config.includeAllRequests ?? false;
 

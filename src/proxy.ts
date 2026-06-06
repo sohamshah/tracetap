@@ -10,6 +10,10 @@ export interface ProxyOptions {
   upstreamProtocol: "https:" | "http:";
   logger: TrafficLogger;
   includeAllRequests: boolean;
+  // Decides which request paths to log when not in include-all mode. Defaults
+  // to Anthropic's /v1/messages. The codex tracer passes a matcher for the
+  // OpenAI Responses endpoint (/responses).
+  logPathMatcher?: (pathname: string) => boolean;
 }
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -27,8 +31,13 @@ const HOP_BY_HOP_HEADERS = new Set([
   "content-encoding",
 ]);
 
-function shouldLogPath(pathname: string, includeAllRequests: boolean): boolean {
+function shouldLogPath(
+  pathname: string,
+  includeAllRequests: boolean,
+  matcher?: (pathname: string) => boolean,
+): boolean {
   if (includeAllRequests) return true;
+  if (matcher) return matcher(pathname);
   return pathname.startsWith("/v1/messages");
 }
 
@@ -62,7 +71,7 @@ function parseResponseBodyForLog(
 }
 
 export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; close: () => Promise<void> }> {
-  const { upstreamHost, upstreamPort, upstreamProtocol, logger, includeAllRequests } = opts;
+  const { upstreamHost, upstreamPort, upstreamProtocol, logger, includeAllRequests, logPathMatcher } = opts;
   const upstreamAgent =
     upstreamProtocol === "https:"
       ? new https.Agent({ keepAlive: true })
@@ -172,7 +181,7 @@ export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; c
         }
       })();
 
-      if (!shouldLogPath(pathname, includeAllRequests)) return;
+      if (!shouldLogPath(pathname, includeAllRequests, logPathMatcher)) return;
 
       const reqBody = Buffer.concat(requestChunks);
       const reqContentType =

@@ -1,31 +1,50 @@
-# claude-trace-v2
+# tracetap
 
-Record every API call your **Claude Code v2** session makes to Anthropic — request bodies, system prompts, tool definitions, streaming responses, token usage — into a JSONL log and a self-contained HTML viewer.
+Capture the full **trajectory** of a coding-agent harness — every API call it makes, with request bodies, system prompts, tool definitions, streaming responses, and token usage — into a JSONL log and a self-contained HTML viewer.
+
+One command, a tool selector, and your normal agent invocation:
+
+```bash
+tracetap <tool> [trace-options] [tool args…]
+```
+
+Supported tools today:
+
+| Tool | Traces | How |
+| ---- | ------ | --- |
+| **`claude`** | Claude Code v2 (native binary) | proxies `ANTHROPIC_BASE_URL` |
+| **`codex`**  | the Codex CLI (native binary)  | injects a temporary OpenAI model provider |
+
+Both are native single binaries you can't loader-patch, so `tracetap` hooks them at the network layer instead. See [Tracing Claude](#tracing-claude) and [Tracing Codex](#tracing-codex).
+
+> **Heads up — package rename.** This project was previously published as `claude-trace-v2` (Claude only). It's now `tracetap` and traces multiple agents. `claude-trace-v2` remains as a thin deprecated alias.
 
 ## Install
 
 ```bash
-npm install -g claude-trace-v2
+npm install -g tracetap
 ```
 
-That's it. Requires Node 18+ and the `claude` CLI from `@anthropic-ai/claude-code` already on your `$PATH`.
+That's it. Requires Node 18+ and whichever agent CLI you want to trace already on your `$PATH` — the `claude` CLI from `@anthropic-ai/claude-code`, and/or the `codex` CLI.
 
 ## Run
 
 ```bash
-claude-trace-v2                              # interactive Claude Code session, fully logged
-claude-trace-v2 --resume                     # resume a previous claude session, fully logged
-claude-trace-v2 -p "hello"                   # one-shot prompt, fully logged
-claude-trace-v2 --generate-html log.jsonl    # re-render an existing log into HTML
+tracetap claude                              # interactive Claude Code session, fully logged
+tracetap claude --resume                     # resume a previous claude session
+tracetap claude -p "hello"                   # one-shot prompt
+tracetap codex exec "summarize this repo"    # non-interactive codex run
+tracetap codex "refactor this module"        # interactive codex session
+tracetap claude --generate-html log.jsonl    # re-render an existing log into HTML
 ```
 
-Any flag we don't recognize as a trace flag is forwarded to the underlying `claude` binary, so most `claude` invocations work just by prefixing them with `claude-trace-v2`. Use `--run-with` if a `claude` flag ever collides with one of ours.
+Everything after the `<tool>` selector is handled by that tool's tracer: a small set of trace flags (below), and **any flag we don't recognize is forwarded verbatim to the underlying binary** — so most `claude`/`codex` invocations work just by prefixing them with `tracetap claude`/`tracetap codex`. Trace flags may also go *before* the tool (`tracetap --log demo codex exec …`). Use `--run-with` if an agent flag ever collides with one of ours.
 
-Output lands in `./.claude-trace/<basename>.{jsonl,html}` next to wherever you ran the command.
+Output lands in `./.claude-trace/` (claude) or `./.codex-trace/` (codex), as `<basename>.{jsonl,html}`, next to wherever you ran the command.
 
 ```
-$ claude-trace-v2
-claude-trace-v2
+$ tracetap claude
+tracetap · claude
 Starting Claude with traffic logging via local proxy
 
 Logs will be written to:
@@ -54,12 +73,12 @@ Uncaught exception: TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extensi
 
 You can't loader-patch a binary you can't load. So this tool takes a different hook.
 
-## How it works
+## Tracing Claude
 
 ```
 ┌────────────────────┐   ANTHROPIC_BASE_URL=http://127.0.0.1:PORT
 │  claude (native    │   ──────────────────────────────────────►   ┌──────────────────┐
-│  binary, child     │                                             │ claude-trace-v2  │
+│  binary, child     │                                             │ tracetap         │
 │  process)          │   ◄──── HTTP/1.1 stream, identity-encoded   │ HTTP proxy on    │
 └────────────────────┘                                             │ 127.0.0.1:PORT   │
                                                                    └─────────┬────────┘
@@ -127,32 +146,34 @@ Every request/response pair is one JSONL line:
 
 ---
 
-## More usage examples
+### More Claude usage examples
 
 ```bash
 # Pass arguments through to the underlying claude binary (unknown flags
 # auto-forward; --run-with is only needed for collisions with trace flags)
-claude-trace-v2 --log demo -p "summarize this repo"
-claude-trace-v2 --resume <session-id>
+tracetap claude --log demo -p "summarize this repo"
+tracetap claude --resume <session-id>
 
 # Capture every request, not just /v1/messages (default filters out
 # unrelated traffic — token-count probes, telemetry, etc.)
-claude-trace-v2 --include-all-requests
+tracetap claude --include-all-requests
 
 # Custom basename for the output files
-claude-trace-v2 --log my-bug-repro
+tracetap claude --log my-bug-repro
 
 # Don't pop the HTML in your browser when the session ends
-claude-trace-v2 --no-open
+tracetap claude --no-open
 
 # Point at a non-default API host (e.g., a staging endpoint)
-claude-trace-v2 --upstream https://api.staging.anthropic.com
+tracetap claude --upstream https://api.staging.anthropic.com
 
 # Override claude binary discovery
-claude-trace-v2 --claude /custom/path/to/claude
+tracetap claude --claude /custom/path/to/claude
 ```
 
-## CLI reference
+### Claude trace flags
+
+Run as `tracetap claude [flag…] [claude args…]`.
 
 | Flag                       | Purpose                                                         |
 | -------------------------- | --------------------------------------------------------------- |
@@ -167,9 +188,71 @@ claude-trace-v2 --claude /custom/path/to/claude
 
 ---
 
+## Tracing Codex
+
+`tracetap codex` records the **[Codex CLI](https://developers.openai.com/codex)**. Codex is also a native single binary, so the loader-patch problem is identical — but Codex doesn't honor an `OPENAI_BASE_URL` env var the way Claude Code honors `ANTHROPIC_BASE_URL`. Instead it routes model traffic through a configurable *model provider*. `tracetap codex` injects a throwaway provider that points Codex at the local proxy:
+
+```bash
+tracetap codex "refactor this module"          # interactive Codex session, fully logged
+tracetap codex exec "summarize the repo"        # non-interactive exec, fully logged
+tracetap codex --log my-session exec -m gpt-5.1 "write tests"
+tracetap codex --generate-html log.jsonl        # re-render an existing log into HTML
+```
+
+Output lands in `./.codex-trace/<basename>.{jsonl,html}`. As with `tracetap claude`, any flag we don't recognize is forwarded straight to the `codex` binary, so `codex exec …`, `codex review`, `codex --resume`, etc. all work by prefixing with `tracetap codex`.
+
+### Auth: API key only
+
+> **Set `OPENAI_API_KEY` before running.** Only the OpenAI **API-key** path is interceptable.
+
+Codex 0.137 has two transports:
+
+- **API key** (`OPENAI_API_KEY`) → plain HTTP `POST /v1/responses` with `Accept: text/event-stream`. This is the same request/SSE shape Claude Code uses, and the proxy captures it cleanly.
+- **Sign in with ChatGPT** → model inference runs over a **WebSocket** to `wss://chatgpt.com/backend-api/codex/responses`. That socket ignores the provider `base_url`, so the proxy never sees it and **cannot** capture it.
+
+If `OPENAI_API_KEY` is unset, `tracetap codex` prints a warning and Codex will fail to authenticate the proxied provider (or silently fall back to the un-capturable ChatGPT websocket). Export an API key to trace via the OpenAI API.
+
+### How the provider injection works
+
+`tracetap codex` prepends these `-c` overrides to your Codex args (they must precede any subcommand, which is why we put them first):
+
+```
+-c model_providers.codex_trace_v2.name=tracetap
+-c model_providers.codex_trace_v2.base_url=http://127.0.0.1:<port>/v1
+-c model_providers.codex_trace_v2.wire_api=responses
+-c model_providers.codex_trace_v2.env_key=OPENAI_API_KEY
+-c model_provider=codex_trace_v2
+```
+
+Codex then sends every `/v1/responses` call to the proxy, which forwards it to `https://api.openai.com` (override with `--upstream`) and tees the bytes to the log. Your `model` and every other setting come from your normal `~/.codex/config.toml` / flags — we only swap the provider.
+
+### The Codex viewer
+
+The HTML report parses the OpenAI **Responses API** shape rather than Anthropic's Messages shape: it reconstructs each conversation from the request `input[]` transcript plus the streamed `response.completed` output, rendering reasoning, tool calls (`exec_command`, etc.), tool outputs, the final assistant message, and per-conversation token usage (input / output / reasoning / cached). Unlike the Claude viewer it needs no external JS bundle — the renderer is inlined in `frontend/codex-template.html`.
+
+### Codex trace flags
+
+Run as `tracetap codex [flag…] [codex args…]`.
+
+| Flag                       | Purpose                                                          |
+| -------------------------- | ---------------------------------------------------------------- |
+| `--generate-html <jsonl>`  | Render a JSONL log to HTML and exit. Optional `[output.html]`.   |
+| `--include-all-requests`   | Log every request, not just `/responses`.                        |
+| `--no-open`                | Don't open the HTML report in browser when the session ends.     |
+| `--log <name>`             | Custom log basename (no extension).                              |
+| `--codex <path>`           | Override path to the `codex` binary (default: `which codex`).    |
+| `--upstream <url>`         | Override the upstream API base (default: `https://api.openai.com`). |
+| `--env-key <NAME>`         | Env var Codex reads the API key from (default: `OPENAI_API_KEY`). |
+| `--run-with <args...>`     | Force everything after this through to `codex`.                  |
+| `--help`, `-h`             | Show usage.                                                      |
+
+---
+
 ## Conversation grouping
 
-The viewer groups raw request/response pairs into "conversations" by hashing each request's `system` and `model`, then merging by first user message. Claude Code v2 stamps two volatile fields into the system field that change on every call:
+*(Claude viewer.)* The codex viewer groups by Codex's per-session `prompt_cache_key` and reconstructs each transcript from the request `input[]`; the rest of this section is Claude-specific.
+
+The Claude viewer groups raw request/response pairs into "conversations" by hashing each request's `system` and `model`, then merging by first user message. Claude Code v2 stamps two volatile fields into the system field that change on every call:
 
 1. A per-call cache hash in the billing-header system block:
    `x-anthropic-billing-header: cc_version=…; cc_entrypoint=cli; cch=7f0d1;` → `cch=34c8e;` next call.
@@ -181,7 +264,7 @@ Without normalization, the same conversation hashes to a different group every t
 
 ## Privacy & security
 
-- **What's stored:** the JSONL log contains the *full* request and response bodies for every API call your session made. That includes your prompts, the system prompts, every tool result your session produced (including file contents your agent read), and the assistant's full output. Treat `.claude-trace/` like you'd treat a shell-history file from a sensitive session — don't paste it into a public bug report without redacting.
+- **What's stored:** the JSONL log contains the *full* request and response bodies for every API call your session made. That includes your prompts, the system prompts, every tool result your session produced (including file contents your agent read), and the assistant's full output. Treat `.claude-trace/` and `.codex-trace/` like you'd treat a shell-history file from a sensitive session — don't paste them into a public bug report without redacting.
 - **What's redacted:** authorization headers (`x-api-key`, `authorization`, `bearer`, `cookie`, `proxy-authorization`, `x-session-token`, `x-auth-token`, `x-access-token`, `set-cookie`) are partially redacted at write time. Only the first ~10 and last 4 characters of the value remain; the middle is replaced with `...`. The token is **not** recoverable from the log.
 - **What's not redacted:** request bodies. If you stuff secrets into your prompts or system messages, those land in the log unmodified — same as any other API tracer.
 - **Network:** all traffic between `claude` and our proxy is plaintext on `127.0.0.1`. The hop from our proxy to Anthropic uses normal TLS through Node's `https` module. No certificates are generated, installed, or trusted.
@@ -194,23 +277,33 @@ Without normalization, the same conversation hashes to a different group every t
 Module layout:
 
 ```
-claude-trace-v2/
+tracetap/
 ├── src/
-│   ├── cli.ts             entry point — arg parsing, claude-binary discovery,
-│   │                      child-process supervision, exit/cleanup.
-│   ├── proxy.ts           the local HTTP server that fronts api.anthropic.com.
+│   ├── tracetap.ts        unified entry — dispatches `tracetap <tool> …` to the
+│   │                      per-tool runner; top-level --help / --version.
+│   ├── claude-cli.ts      claude runner — arg parsing, claude-binary discovery,
+│   │                      child supervision, exit/cleanup.
+│   ├── codex-cli.ts       codex runner — same lifecycle, but injects a
+│   │                      `-c model_providers.*` override instead of an env var.
+│   ├── proxy.ts           the local HTTP server that fronts the upstream API.
 │   │                      Streams response bytes to the client AS THEY ARRIVE
 │   │                      (no buffering — interactive output stays live)
 │   │                      while teeing them into a per-request log buffer.
+│   │                      `logPathMatcher` selects which paths to log
+│   │                      (/v1/messages for claude, /responses for codex).
 │   ├── logger.ts          JSONL writer + sensitive-header redactor +
-│   │                      coalesced HTML re-render.
-│   ├── html-generator.ts  injects the captured pairs into the viewer template
-│   │                      using base64 to dodge HTML/JSON-in-string escaping.
+│   │                      coalesced HTML re-render. Takes a pluggable
+│   │                      `htmlGenerator` so it serves both tracers.
+│   ├── html-generator.ts  Anthropic viewer: injects pairs into the Lit bundle
+│   │                      template using base64.
+│   ├── codex-html-generator.ts  OpenAI Responses viewer: injects pairs into the
+│   │                      self-contained codex-template.html.
 │   └── types.ts           shared shapes for request/response pairs.
 └── frontend/
-    ├── template.html      tiny shell with three replacement markers
+    ├── template.html        claude shell with three replacement markers
+    ├── codex-template.html  self-contained codex viewer (inline CSS + JS)
     ├── dist/
-    │   └── index.global.js   ~810 KB IIFE bundle of the Lit-based viewer
+    │   └── index.global.js   ~810 KB IIFE bundle of the Lit-based claude viewer
     └── patches/
         └── v2-grouping-normalization.patch
 ```
@@ -227,12 +320,17 @@ A vanilla `http.createServer` on `127.0.0.1:0` (port 0 = OS-assigned). Per reque
 
 `CONNECT` requests (which the SDK won't issue when pointed at an `http://` upstream, but we handle them defensively) tunnel without logging.
 
-### The CLI (`src/cli.ts`)
+### The CLI (`src/tracetap.ts` → `src/claude-cli.ts` / `src/codex-cli.ts`)
 
+`tracetap.ts` is a thin dispatcher: it finds the first `claude`/`codex` token, hands everything else to that tool's `run(argv)` (trace flags before *or* after the tool both work, since each runner extracts its own flags by name). Each runner is also directly executable for back-compat.
+
+The **claude** runner:
 - Discovers `claude` via `which claude`, with fallbacks for the `~/.claude/local/claude` bash wrapper that some Anthropic install paths produce. Resolves through symlinks but does *not* try to find a JS file underneath — the binary is fine as-is.
 - Spawns claude with `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` injected. Everything else in `process.env` is preserved (so your existing `ANTHROPIC_API_KEY` keeps working).
 - Forwards `SIGINT`/`SIGTERM` to the child.
 - On child exit, finalizes the proxy + log, optionally pops the HTML in `open(1)`.
+
+The **codex** runner does the same, but instead of an env var it prepends `-c model_providers.*` overrides (see [How the provider injection works](#how-the-provider-injection-works)) and logs `/responses` instead of `/v1/messages`.
 
 ---
 
@@ -253,10 +351,12 @@ The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-bu
 | Component                      | Tested with                 |
 | ------------------------------ | --------------------------- |
 | `@anthropic-ai/claude-code`    | `2.1.123`                   |
+| Codex CLI                      | `0.137.0` (OpenAI API-key auth) |
 | Node (CLI host)                | `22.14`                     |
 | macOS                          | Darwin 25 (arm64)           |
 | Linux                          | not yet, but should work    |
 | AWS Bedrock / Vertex backends  | not supported (different env vars route around `ANTHROPIC_BASE_URL`) |
+| Codex "Sign in with ChatGPT"   | not supported (model inference runs over a WebSocket the proxy can't see) |
 
 ---
 
@@ -270,6 +370,10 @@ The TypeScript build outputs to `dist/`. The frontend bundle is committed pre-bu
 
 **JSONL has only orphaned requests** — the upstream connection terminated before a response arrived. Usually means a request/auth error; check the next pair (or use `--include-all-requests`) to see why.
 
+**(Codex) every pair is a 401 / "Incorrect API key"** — `OPENAI_API_KEY` is unset or wrong. The proxied provider authenticates with that key against `api.openai.com`. The requests are still fully captured (that's the point), but no model output comes back until the key is valid.
+
+**(Codex) nothing logged at all** — you're probably on "Sign in with ChatGPT" auth, whose model traffic runs over a WebSocket to `chatgpt.com` that bypasses the provider `base_url`. Export an `OPENAI_API_KEY` to route inference through the captureable `/v1/responses` HTTP path. Use `--include-all-requests` to confirm the proxy is seeing *any* codex traffic.
+
 ---
 
 ## Contributing
@@ -279,7 +383,7 @@ PRs welcome. The surface area is small:
 - `src/proxy.ts` is the only piece that talks to anything external — keep it simple, keep it streaming.
 - New CLI flags should match conventional names where they overlap (`--include-all-requests`, `--no-open`, `--log`, `--generate-html`).
 
-If you find a Claude Code header / env var / wire change that breaks logging, please open an issue with a redacted JSONL fragment so the regression can be reproduced.
+If you find a Claude Code or Codex header / env var / wire change that breaks logging, please open an issue with a redacted JSONL fragment so the regression can be reproduced.
 
 ---
 

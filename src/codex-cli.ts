@@ -3,11 +3,10 @@
 import { spawn, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
-import * as os from "os";
 import { URL } from "url";
 import { TrafficLogger } from "./logger";
 import { createProxyServer } from "./proxy";
-import { HTMLGenerator } from "./html-generator";
+import { CodexHTMLGenerator } from "./codex-html-generator";
 
 const colors = {
   red: "\x1b[0;31m",
@@ -23,51 +22,64 @@ function log(message: string, color: ColorName = "reset"): void {
   console.log(`${colors[color]}${message}${colors.reset}`);
 }
 
+// Codex resolves a custom model provider's base_url by appending the wire-API
+// path (e.g. /responses). The proxy forwards the request path verbatim to the
+// upstream host, so we hand codex "<proxy>/v1" and only log the /responses hop.
+const PROVIDER_ID = "codex_trace_v2";
+
 function showHelp(): void {
   console.log(`
-${colors.blue}claude-trace-v2${colors.reset}
-Record interactions with Claude Code v2 (native binary) by proxying ANTHROPIC_BASE_URL.
+${colors.blue}tracetap codex${colors.reset}
+Record interactions with the Codex CLI by routing its OpenAI Responses API
+traffic through a local proxy (via a temporary custom model provider).
 
 ${colors.yellow}USAGE:${colors.reset}
-  claude-trace-v2 [OPTIONS] [CLAUDE_ARG...] [--run-with CLAUDE_ARG...]
+  tracetap codex [OPTIONS] [CODEX_ARG...] [--run-with CODEX_ARG...]
 
-  Any flag not listed below is forwarded verbatim to the claude binary,
-  so e.g. \`claude-trace-v2 --resume\` just works. Use --run-with if a
-  claude flag collides with one of ours.
+  Any flag not listed below is forwarded verbatim to the codex binary, so e.g.
+  \`tracetap codex exec "fix the bug"\` just works. Use --run-with if a codex
+  flag collides with one of ours.
 
 ${colors.yellow}OPTIONS:${colors.reset}
   --generate-html <file.jsonl> [out.html]   Generate HTML report from a JSONL log
-  --include-all-requests                    Log every request, not just /v1/messages
+  --include-all-requests                    Log every request, not just /responses
   --no-open                                 Do not open the HTML report in browser on exit
   --log <name>                              Custom log base name (no extension)
-  --claude <path>                           Override path to the claude binary
-  --upstream <url>                          Override upstream API base (default: https://api.anthropic.com)
-  --run-with <args...>                      Force everything after this to be passed to claude
+  --codex <path>                            Override path to the codex binary
+  --upstream <url>                          Override upstream API base (default: https://api.openai.com)
+  --env-key <NAME>                          Env var codex reads the API key from (default: OPENAI_API_KEY)
+  --run-with <args...>                      Force everything after this to be passed to codex
   --help, -h                                Show this help
 
 ${colors.yellow}EXAMPLES:${colors.reset}
-  claude-trace-v2
-  claude-trace-v2 --resume
-  claude-trace-v2 --include-all-requests --resume <session-id>
-  claude-trace-v2 --log my-session --model sonnet
-  claude-trace-v2 --generate-html .claude-trace/log-2026-05-05-12-00-00.jsonl
+  tracetap codex "refactor this module"
+  tracetap codex exec "summarize the repo"
+  tracetap codex --log my-session exec -m gpt-5.1 "write tests"
+  tracetap codex --include-all-requests review
+  tracetap codex --generate-html .codex-trace/log-2026-06-05-12-00-00.jsonl
+
+${colors.yellow}AUTH:${colors.reset}
+  Inference traffic is only interceptable on the OpenAI API-key path. Set
+  OPENAI_API_KEY (or --env-key) before running. ChatGPT-login (Sign in with
+  ChatGPT) routes model calls over a WebSocket to chatgpt.com that this proxy
+  cannot capture.
 
 ${colors.yellow}OUTPUT:${colors.reset}
-  Logs are saved to .claude-trace/<basename>.{jsonl,html} in the current directory.
+  Logs are saved to .codex-trace/<basename>.{jsonl,html} in the current directory.
 `);
 }
 
-function findClaudeBinary(custom?: string): string {
+function findCodexBinary(custom?: string): string {
   if (custom) {
     if (!fs.existsSync(custom)) {
-      log(`Claude binary not found at: ${custom}`, "red");
+      log(`Codex binary not found at: ${custom}`, "red");
       process.exit(1);
     }
     return fs.realpathSync(custom);
   }
 
   try {
-    const which = require("child_process").execSync("which claude", {
+    const which = require("child_process").execSync("which codex", {
       encoding: "utf-8",
     }) as string;
     let p = which.trim();
@@ -75,25 +87,24 @@ function findClaudeBinary(custom?: string): string {
     if (aliasMatch) p = aliasMatch[1];
     return fs.realpathSync(p);
   } catch {
-    const local = path.join(os.homedir(), ".claude", "local", "claude");
-    if (fs.existsSync(local)) return fs.realpathSync(local);
-    log("claude binary not found. Install @anthropic-ai/claude-code first.", "red");
+    log("codex binary not found. Install the Codex CLI first, or pass --codex /path/to/codex.", "red");
     process.exit(1);
   }
 }
 
 interface RunOpts {
-  claudeArgs: string[];
+  codexArgs: string[];
   includeAllRequests: boolean;
   openInBrowser: boolean;
-  customClaudePath?: string;
+  customCodexPath?: string;
   logBaseName?: string;
   upstreamUrl: string;
+  envKey: string;
 }
 
-async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
-  log("claude-trace-v2", "blue");
-  log("Starting Claude with traffic logging via local proxy", "yellow");
+async function runCodexWithProxy(opts: RunOpts): Promise<void> {
+  log("tracetap · codex", "blue");
+  log("Starting Codex with traffic logging via local proxy", "yellow");
 
   const upstream = new URL(opts.upstreamUrl);
   if (upstream.protocol !== "http:" && upstream.protocol !== "https:") {
@@ -106,10 +117,22 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
       ? 443
       : 80;
 
+  if (!process.env[opts.envKey]) {
+    log(
+      `Warning: ${opts.envKey} is not set. Codex needs an API key on this env var to ` +
+        `authenticate the proxied provider. If you normally use "Sign in with ChatGPT", ` +
+        `model traffic goes over a WebSocket this proxy can't capture — set ${opts.envKey} ` +
+        `to trace via the OpenAI API instead.`,
+      "yellow",
+    );
+  }
+
   const logger = new TrafficLogger({
+    logDirectory: ".codex-trace",
     logBaseName: opts.logBaseName,
     enableRealTimeHTML: true,
     includeAllRequests: opts.includeAllRequests,
+    htmlGenerator: new CodexHTMLGenerator(),
   });
 
   console.log("");
@@ -124,20 +147,34 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
     upstreamProtocol: upstream.protocol as "http:" | "https:",
     logger,
     includeAllRequests: opts.includeAllRequests,
+    logPathMatcher: (pathname) => pathname.endsWith("/responses"),
   });
 
   const proxyUrl = `http://127.0.0.1:${port}`;
   log(`Proxy listening at ${proxyUrl} → ${opts.upstreamUrl}`, "dim");
 
-  const claudePath = findClaudeBinary(opts.customClaudePath);
-  log(`Using Claude binary: ${claudePath}`, "blue");
+  const codexPath = findCodexBinary(opts.customCodexPath);
+  log(`Using Codex binary: ${codexPath}`, "blue");
   console.log("");
 
-  const child: ChildProcess = spawn(claudePath, opts.claudeArgs, {
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: proxyUrl,
-    },
+  // Inject a temporary custom model provider that points codex at the proxy.
+  // These -c overrides must precede any subcommand, so they go at the front.
+  const providerArgs = [
+    "-c",
+    `model_providers.${PROVIDER_ID}.name=tracetap`,
+    "-c",
+    `model_providers.${PROVIDER_ID}.base_url=${proxyUrl}/v1`,
+    "-c",
+    `model_providers.${PROVIDER_ID}.wire_api=responses`,
+    "-c",
+    `model_providers.${PROVIDER_ID}.env_key=${opts.envKey}`,
+    "-c",
+    `model_provider=${PROVIDER_ID}`,
+  ];
+  const fullArgs = [...providerArgs, ...opts.codexArgs];
+
+  const child: ChildProcess = spawn(codexPath, fullArgs, {
+    env: { ...process.env },
     stdio: "inherit",
     cwd: process.cwd(),
   });
@@ -167,7 +204,7 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
   };
 
   child.on("error", async (err) => {
-    log(`Error starting Claude: ${err.message}`, "red");
+    log(`Error starting Codex: ${err.message}`, "red");
     await cleanup();
     process.exit(1);
   });
@@ -181,13 +218,13 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
   await new Promise<void>((resolve) => {
     child.on("exit", (code, signal) => {
       if (signal) {
-        log(`\nClaude terminated by signal: ${signal}`, "yellow");
+        log(`\nCodex terminated by signal: ${signal}`, "yellow");
         exitCode = 1;
       } else if (code !== 0 && code !== null) {
-        log(`\nClaude exited with code: ${code}`, "yellow");
+        log(`\nCodex exited with code: ${code}`, "yellow");
         exitCode = code;
       } else {
-        log("\nClaude session completed", "green");
+        log("\nCodex session completed", "green");
       }
       resolve();
     });
@@ -204,7 +241,7 @@ async function generateHTMLFromCLI(
   openInBrowser: boolean,
 ): Promise<void> {
   try {
-    const generator = new HTMLGenerator();
+    const generator = new CodexHTMLGenerator();
     const finalOut = await generator.generateHTMLFromJSONL(
       inputFile,
       outputFile,
@@ -221,19 +258,19 @@ async function generateHTMLFromCLI(
   }
 }
 
-const TRACE_VALUE_FLAGS = new Set(["--log", "--claude", "--upstream"]);
+const TRACE_VALUE_FLAGS = new Set(["--log", "--codex", "--upstream", "--env-key"]);
 const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open"]);
 
 interface ParsedArgs {
   trace: Record<string, string | boolean>;
   generateHtml?: { input: string; output?: string };
-  claudeArgs: string[];
+  codexArgs: string[];
   help: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const trace: Record<string, string | boolean> = {};
-  const claudeArgs: string[] = [];
+  const codexArgs: string[] = [];
   let generateHtml: ParsedArgs["generateHtml"];
   let help = false;
 
@@ -274,15 +311,14 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
-    claudeArgs.push(a);
+    codexArgs.push(a);
   }
 
-  claudeArgs.push(...tail);
-  return { trace, generateHtml, claudeArgs, help };
+  codexArgs.push(...tail);
+  return { trace, generateHtml, codexArgs, help };
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+export async function run(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
 
   if (parsed.help) {
@@ -292,12 +328,11 @@ async function main(): Promise<void> {
 
   const includeAllRequests = parsed.trace["--include-all-requests"] === true;
   const openInBrowser = parsed.trace["--no-open"] !== true;
-  const customClaudePath = parsed.trace["--claude"] as string | undefined;
+  const customCodexPath = parsed.trace["--codex"] as string | undefined;
   const logBaseName = parsed.trace["--log"] as string | undefined;
+  const envKey = (parsed.trace["--env-key"] as string | undefined) || "OPENAI_API_KEY";
   const upstreamUrl =
-    (parsed.trace["--upstream"] as string | undefined) ||
-    process.env.ANTHROPIC_BASE_URL ||
-    "https://api.anthropic.com";
+    (parsed.trace["--upstream"] as string | undefined) || "https://api.openai.com";
 
   if (parsed.generateHtml) {
     if (!parsed.generateHtml.input) {
@@ -313,17 +348,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  await runClaudeWithProxy({
-    claudeArgs: parsed.claudeArgs,
+  await runCodexWithProxy({
+    codexArgs: parsed.codexArgs,
     includeAllRequests,
     openInBrowser,
-    customClaudePath,
+    customCodexPath,
     logBaseName,
     upstreamUrl,
+    envKey,
   });
 }
 
-main().catch((err) => {
-  log(`Unexpected error: ${(err as Error).message}`, "red");
-  process.exit(1);
-});
+// Allow direct invocation (back-compat) as well as dispatch from tracetap.ts.
+if (require.main === module) {
+  run(process.argv.slice(2)).catch((err) => {
+    log(`Unexpected error: ${(err as Error).message}`, "red");
+    process.exit(1);
+  });
+}

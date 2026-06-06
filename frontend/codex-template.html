@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>codex-trace-__CODEX_TITLE__</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --bg-elev: #171a23;
+      --bg-elev2: #1f2330;
+      --border: #2a2f3d;
+      --text: #d8dee9;
+      --text-dim: #8a93a6;
+      --accent: #5ac8a8;
+      --accent-2: #7aa2f7;
+      --user: #7aa2f7;
+      --assistant: #5ac8a8;
+      --reasoning: #b48ead;
+      --tool: #e0af68;
+      --tool-out: #88909e;
+      --error: #f7768e;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header h1 .codex { color: var(--accent); }
+    .summary { color: var(--text-dim); font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
+    .summary b { color: var(--text); font-weight: 600; }
+    .controls { margin-left: auto; display: flex; gap: 8px; }
+    button.ctl {
+      background: var(--bg-elev2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button.ctl:hover { border-color: var(--accent); }
+    main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+
+    .conv {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 18px;
+      overflow: hidden;
+      background: var(--bg-elev);
+    }
+    .conv-head {
+      padding: 12px 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      user-select: none;
+      background: var(--bg-elev);
+    }
+    .conv-head:hover { background: var(--bg-elev2); }
+    .conv-head .caret { color: var(--text-dim); transition: transform 0.12s; }
+    .conv.collapsed .conv-head .caret { transform: rotate(-90deg); }
+    .conv-title { font-weight: 600; }
+    .conv-model { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+    .conv-meta { color: var(--text-dim); font-size: 12px; display: flex; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+    .conv-body { padding: 0 16px 16px; }
+    .conv.collapsed .conv-body { display: none; }
+
+    .section { margin-top: 14px; }
+    .section-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+
+    .turn {
+      border-left: 3px solid var(--border);
+      padding: 8px 0 8px 12px;
+      margin: 8px 0;
+    }
+    .turn.role-user { border-color: var(--user); }
+    .turn.role-assistant { border-color: var(--assistant); }
+    .turn.role-developer, .turn.role-system { border-color: var(--text-dim); }
+    .turn.kind-reasoning { border-color: var(--reasoning); }
+    .turn.kind-tool_call { border-color: var(--tool); }
+    .turn.kind-tool_output { border-color: var(--tool-out); }
+    .turn.kind-other { border-color: var(--border); }
+    .turn-head {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .turn.role-user .turn-head { color: var(--user); }
+    .turn.role-assistant .turn-head { color: var(--assistant); }
+    .turn.kind-reasoning .turn-head { color: var(--reasoning); }
+    .turn.kind-tool_call .turn-head { color: var(--tool); }
+    .turn.kind-tool_output .turn-head { color: var(--tool-out); }
+    .turn.role-developer .turn-head, .turn.role-system .turn-head { color: var(--text-dim); }
+
+    .content { white-space: pre-wrap; word-break: break-word; font-family: inherit; }
+    .content.mono, pre.json { font-family: var(--mono); font-size: 12.5px; }
+    pre.json {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      white-space: pre;
+      margin: 4px 0 0;
+    }
+    .tool-name { font-family: var(--mono); color: var(--tool); font-weight: 600; }
+
+    details { margin: 4px 0; }
+    details > summary {
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 12px;
+      user-select: none;
+      padding: 2px 0;
+    }
+    details > summary:hover { color: var(--text); }
+    details[open] > summary { color: var(--text); margin-bottom: 4px; }
+
+    .pill {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--bg-elev2);
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+    }
+    .pill.ok { color: var(--accent); border-color: #2e5b4e; }
+    .pill.err { color: var(--error); border-color: #5b2e38; }
+    .err-msg { color: var(--error); font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
+    .tool-list-item { margin: 2px 0; }
+    .tool-list-item code { color: var(--tool); font-family: var(--mono); }
+    .empty { color: var(--text-dim); padding: 40px; text-align: center; }
+    .truncated-note { color: var(--text-dim); font-style: italic; font-size: 12px; }
+    a.raw-link { color: var(--accent-2); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="codex">codex</span>-trace-v2</h1>
+    <div class="summary" id="summary"></div>
+    <div class="controls">
+      <button class="ctl" id="expandAll">Expand all</button>
+      <button class="ctl" id="collapseAll">Collapse all</button>
+    </div>
+  </header>
+  <main id="root"></main>
+
+  <script>
+    window.__CODEX_DATA_B64__ = "__CODEX_DATA__";
+  </script>
+  <script>
+  (function () {
+    "use strict";
+
+    function b64ToUtf8(b64) {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder("utf-8").decode(bytes);
+    }
+
+    var data;
+    try {
+      data = JSON.parse(b64ToUtf8(window.__CODEX_DATA_B64__));
+    } catch (e) {
+      data = { rawPairs: [] };
+    }
+    var pairs = (data && data.rawPairs) || [];
+
+    function esc(s) {
+      if (s === null || s === undefined) return "";
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+    function prettyJson(v) {
+      try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+    }
+    function maybeParse(s) {
+      if (typeof s !== "string") return s;
+      var t = s.trim();
+      if (!t || (t[0] !== "{" && t[0] !== "[")) return s;
+      try { return JSON.parse(t); } catch (e) { return s; }
+    }
+    function djb2(str) {
+      var h = 5381;
+      for (var i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(16);
+    }
+    function fmtTime(secs) {
+      if (!secs) return "";
+      try { return new Date(secs * 1000).toLocaleTimeString(); } catch (e) { return ""; }
+    }
+    function fmtNum(n) {
+      if (n === null || n === undefined) return "0";
+      return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    }
+
+    // ---- Request classification ------------------------------------------
+    function isResponsesRequest(pair) {
+      var b = pair && pair.request && pair.request.body;
+      if (!b || typeof b !== "object") return false;
+      // OpenAI Responses API request bodies carry input[] (+ usually instructions).
+      return Array.isArray(b.input) || typeof b.instructions === "string";
+    }
+
+    // ---- Response parsing -------------------------------------------------
+    function parseSSE(raw, status) {
+      var events = [];
+      var blocks = raw.split(/\r?\n\r?\n/);
+      for (var i = 0; i < blocks.length; i++) {
+        var ev = null, dataLines = [];
+        var lines = blocks[i].split(/\r?\n/);
+        for (var j = 0; j < lines.length; j++) {
+          var line = lines[j];
+          if (line.indexOf("event:") === 0) ev = line.slice(6).trim();
+          else if (line.indexOf("data:") === 0) dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+        if (!dataLines.length) continue;
+        var dataStr = dataLines.join("\n");
+        if (dataStr === "[DONE]") continue;
+        var d;
+        try { d = JSON.parse(dataStr); } catch (e) { d = dataStr; }
+        events.push({ ev: ev || (d && d.type) || null, data: d });
+      }
+
+      var completed = null, failed = null, errorMsg = null;
+      for (var k = 0; k < events.length; k++) {
+        var t = events[k].ev, dd = events[k].data;
+        if (t === "response.completed") completed = dd;
+        else if (t === "response.failed") failed = dd;
+        else if (t === "error") errorMsg = (dd && (dd.message || (dd.error && dd.error.message))) || "stream error";
+      }
+      if (completed && completed.response) {
+        return { items: completed.response.output || [], usage: completed.response.usage || null, status: status, eventCount: events.length };
+      }
+      if (failed && failed.response) {
+        var fe = failed.response.error;
+        return { items: failed.response.output || [], usage: failed.response.usage || null, status: status,
+                 error: (fe && fe.message) || "response failed", eventCount: events.length };
+      }
+      // Fallback: assemble streaming deltas if no terminal event arrived.
+      var asm = assembleFromDeltas(events);
+      return { items: asm.items, usage: asm.usage, status: status, error: errorMsg, eventCount: events.length, partial: true };
+    }
+
+    function assembleFromDeltas(events) {
+      var byIdx = {};
+      var usage = null;
+      function ensure(idx, seed) {
+        if (byIdx[idx] === undefined) byIdx[idx] = seed || {};
+        return byIdx[idx];
+      }
+      for (var i = 0; i < events.length; i++) {
+        var ev = events[i].ev, d = events[i].data;
+        if (!d || typeof d !== "object") continue;
+        var idx = d.output_index;
+        if (ev === "response.output_item.added" && d.item) {
+          byIdx[idx] = JSON.parse(JSON.stringify(d.item));
+        } else if (ev === "response.output_item.done" && d.item) {
+          byIdx[idx] = d.item;
+        } else if (ev === "response.output_text.delta") {
+          var it = ensure(idx, { type: "message", role: "assistant", content: [{ type: "output_text", text: "" }] });
+          if (!it.content) it.content = [{ type: "output_text", text: "" }];
+          var last = it.content[it.content.length - 1];
+          last.text = (last.text || "") + (d.delta || "");
+        } else if (ev === "response.function_call_arguments.delta") {
+          var fc = ensure(idx, { type: "function_call", name: d.name || "", arguments: "" });
+          fc.arguments = (fc.arguments || "") + (d.delta || "");
+        } else if (ev === "response.reasoning_summary_text.delta" || ev === "response.reasoning_text.delta") {
+          var rz = ensure(idx, { type: "reasoning", summary: [{ type: "summary_text", text: "" }] });
+          if (!rz.summary || !rz.summary.length) rz.summary = [{ type: "summary_text", text: "" }];
+          var ls = rz.summary[rz.summary.length - 1];
+          ls.text = (ls.text || "") + (d.delta || "");
+        } else if (ev === "response.completed" && d.response) {
+          usage = d.response.usage || usage;
+        }
+      }
+      var items = [];
+      Object.keys(byIdx).sort(function (a, b) { return a - b; }).forEach(function (kk) { items.push(byIdx[kk]); });
+      return { items: items, usage: usage };
+    }
+
+    function parseResponse(pair) {
+      var resp = pair && pair.response;
+      if (!resp) return { items: [], usage: null, status: null, error: "no response (orphaned request)" };
+      var status = resp.status_code;
+      if (resp.body && typeof resp.body === "object") {
+        var b = resp.body;
+        if (b.error) return { items: [], usage: null, status: status, error: b.error.message || prettyJson(b.error) };
+        if (Array.isArray(b.output)) return { items: b.output, usage: b.usage || null, status: status };
+        return { items: [], usage: b.usage || null, status: status, raw: b };
+      }
+      if (typeof resp.body_raw === "string" && resp.body_raw.length) {
+        // Could be an SSE stream or a plain JSON/text error body.
+        if (/^\s*[{[]/.test(resp.body_raw) && resp.body_raw.indexOf("\ndata:") === -1 && resp.body_raw.indexOf("event:") === -1) {
+          try {
+            var pj = JSON.parse(resp.body_raw);
+            if (pj.error) return { items: [], usage: null, status: status, error: pj.error.message || prettyJson(pj.error) };
+            if (Array.isArray(pj.output)) return { items: pj.output, usage: pj.usage || null, status: status };
+          } catch (e) { /* fall through to SSE */ }
+        }
+        return parseSSE(resp.body_raw, status);
+      }
+      return { items: [], usage: null, status: status };
+    }
+
+    // ---- Item rendering ---------------------------------------------------
+    function partToText(part) {
+      if (part === null || part === undefined) return "";
+      if (typeof part === "string") return part;
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.input_text === "string") return part.input_text;
+      if (part.type === "input_image") return "[image: " + esc(part.image_url || part.detail || "image") + "]";
+      return prettyJson(part);
+    }
+    function contentToText(content) {
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) return content.map(partToText).join("\n");
+      if (content === null || content === undefined) return "";
+      return prettyJson(content);
+    }
+
+    function renderItem(item) {
+      if (!item || typeof item !== "object") {
+        return turnHtml("other", "kind-other", "Item", '<pre class="json">' + esc(prettyJson(item)) + "</pre>");
+      }
+      var type = item.type || (item.role ? "message" : "unknown");
+
+      if (type === "message") {
+        var role = item.role || "assistant";
+        var roleClass = "role-" + role;
+        var text = contentToText(item.content);
+        return turnHtml(role, roleClass, role, '<div class="content">' + esc(text) + "</div>");
+      }
+      if (type === "reasoning") {
+        var rtext = "";
+        if (Array.isArray(item.summary) && item.summary.length) rtext = item.summary.map(partToText).join("\n");
+        else if (Array.isArray(item.content) && item.content.length) rtext = item.content.map(partToText).join("\n");
+        if (!rtext) rtext = "(no summary)";
+        return turnHtml("reasoning", "kind-reasoning", "Reasoning", '<div class="content">' + esc(rtext) + "</div>");
+      }
+      if (type === "function_call" || type === "custom_tool_call" || type === "local_shell_call") {
+        var name = item.name || (item.action && item.action.type) || "tool";
+        var args = maybeParse(item.arguments !== undefined ? item.arguments : item.input);
+        var argHtml;
+        if (typeof args === "string") argHtml = '<div class="content mono">' + esc(args) + "</div>";
+        else argHtml = '<pre class="json">' + esc(prettyJson(args)) + "</pre>";
+        var head = '<span class="tool-name">' + esc(name) + "</span>";
+        return turnHtml("tool_call", "kind-tool_call", "Tool call → " + head, argHtml, true);
+      }
+      if (type === "function_call_output" || type === "custom_tool_call_output" || type === "local_shell_call_output") {
+        var out = item.output;
+        var parsed = maybeParse(out);
+        var body;
+        if (parsed && typeof parsed === "object" && typeof parsed.output === "string") {
+          body = '<div class="content">' + esc(parsed.output) + "</div>";
+          if (parsed.metadata) body += '<details><summary>metadata</summary><pre class="json">' + esc(prettyJson(parsed.metadata)) + "</pre></details>";
+        } else if (typeof parsed === "object") {
+          body = '<pre class="json">' + esc(prettyJson(parsed)) + "</pre>";
+        } else {
+          body = '<div class="content">' + esc(parsed) + "</div>";
+        }
+        return turnHtml("tool_output", "kind-tool_output", "Tool output ←", body, true);
+      }
+      // Unknown item type: dump JSON.
+      return turnHtml(type, "kind-other", esc(type), '<pre class="json">' + esc(prettyJson(item)) + "</pre>", true);
+    }
+
+    function turnHtml(role, cls, headLabel, bodyHtml, collapsibleLong) {
+      var inner = bodyHtml;
+      // Auto-collapse very long tool bodies to keep the transcript scannable.
+      if (collapsibleLong) {
+        var plain = bodyHtml.replace(/<[^>]+>/g, "");
+        if (plain.length > 1400) {
+          inner = '<details><summary>show ' + fmtNum(plain.length) + ' chars</summary>' + bodyHtml + "</details>";
+        }
+      }
+      return '<div class="turn ' + cls + '"><div class="turn-head">' + headLabel + "</div>" + inner + "</div>";
+    }
+
+    function renderItems(items) {
+      if (!items || !items.length) return "";
+      return items.map(renderItem).join("");
+    }
+
+    // ---- Usage ------------------------------------------------------------
+    function usageBits(u) {
+      if (!u) return null;
+      var inT = u.input_tokens, outT = u.output_tokens, total = u.total_tokens;
+      var cached = u.input_tokens_details && u.input_tokens_details.cached_tokens;
+      var reason = u.output_tokens_details && u.output_tokens_details.reasoning_tokens;
+      return { input: inT || 0, output: outT || 0, total: total || ((inT || 0) + (outT || 0)), cached: cached || 0, reasoning: reason || 0 };
+    }
+    function sumUsage(a, b) {
+      if (!b) return a;
+      a.input += b.input; a.output += b.output; a.total += b.total; a.cached += b.cached; a.reasoning += b.reasoning;
+      return a;
+    }
+
+    // ---- Grouping ---------------------------------------------------------
+    function convKey(pair) {
+      var b = pair.request.body;
+      if (b && b.prompt_cache_key) return "k:" + b.prompt_cache_key;
+      // Fallback: model + first user message text.
+      var model = (b && b.model) || "?";
+      var firstUser = "";
+      if (b && Array.isArray(b.input)) {
+        for (var i = 0; i < b.input.length; i++) {
+          if (b.input[i] && b.input[i].role === "user") { firstUser = contentToText(b.input[i].content); break; }
+        }
+      }
+      return "h:" + djb2(model + "|" + firstUser.slice(0, 200));
+    }
+
+    // ---- Build view -------------------------------------------------------
+    var responsePairs = [], otherPairs = [];
+    for (var i = 0; i < pairs.length; i++) {
+      if (isResponsesRequest(pairs[i])) responsePairs.push(pairs[i]);
+      else otherPairs.push(pairs[i]);
+    }
+
+    var groups = {}, order = [];
+    for (var i = 0; i < responsePairs.length; i++) {
+      var key = convKey(responsePairs[i]);
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(responsePairs[i]);
+    }
+
+    var totalTokens = { input: 0, output: 0, total: 0, cached: 0, reasoning: 0 };
+
+    function renderConversation(key, idx) {
+      var convPairs = groups[key];
+      // Pairs are appended chronologically; the last request carries the
+      // fullest input[] (codex resends the whole transcript each turn).
+      var last = convPairs[convPairs.length - 1];
+      var lastReq = last.request.body;
+      var model = lastReq.model || "?";
+
+      var convUsage = { input: 0, output: 0, total: 0, cached: 0, reasoning: 0 };
+      var parsedResponses = convPairs.map(function (p) {
+        var r = parseResponse(p);
+        var u = usageBits(r.usage);
+        if (u) sumUsage(convUsage, u);
+        return r;
+      });
+      sumUsage(totalTokens, { input: convUsage.input, output: convUsage.output, total: convUsage.total, cached: convUsage.cached, reasoning: convUsage.reasoning });
+
+      var lastResp = parsedResponses[parsedResponses.length - 1];
+
+      // Transcript = full history from last request + the final assistant turn.
+      var transcriptItems = (Array.isArray(lastReq.input) ? lastReq.input.slice() : []);
+      if (lastResp && lastResp.items && lastResp.items.length) {
+        transcriptItems = transcriptItems.concat(lastResp.items);
+      }
+
+      var firstUserText = "";
+      for (var u2 = 0; u2 < transcriptItems.length; u2++) {
+        if (transcriptItems[u2] && transcriptItems[u2].role === "user") {
+          var t = contentToText(transcriptItems[u2].content).trim();
+          // Skip the injected <environment_context> preamble for the title.
+          if (t && t.indexOf("<environment_context>") !== 0) { firstUserText = t; break; }
+        }
+      }
+      var title = firstUserText ? firstUserText.split("\n")[0].slice(0, 90) : ("Conversation " + (idx + 1));
+
+      var anyError = parsedResponses.some(function (r) { return r.error; });
+
+      var html = "";
+      html += '<div class="conv-head" data-toggle="conv">';
+      html += '<span class="caret">▼</span>';
+      html += '<span class="conv-title">' + esc(title) + "</span>";
+      html += '<span class="conv-model">' + esc(model) + "</span>";
+      html += '<span class="conv-meta">';
+      html += "<span>" + convPairs.length + " turn" + (convPairs.length === 1 ? "" : "s") + "</span>";
+      html += "<span>" + fmtNum(convUsage.total) + " tok</span>";
+      if (convUsage.reasoning) html += "<span>" + fmtNum(convUsage.reasoning) + " reasoning</span>";
+      if (convUsage.cached) html += "<span>" + fmtNum(convUsage.cached) + " cached</span>";
+      if (anyError) html += '<span class="pill err">error</span>';
+      html += "</span></div>";
+
+      html += '<div class="conv-body">';
+
+      // Instructions (system prompt)
+      if (typeof lastReq.instructions === "string" && lastReq.instructions.length) {
+        html += '<div class="section"><details><summary>System instructions (' + fmtNum(lastReq.instructions.length) + ' chars)</summary>' +
+                '<div class="content">' + esc(lastReq.instructions) + "</div></details></div>";
+      }
+
+      // Tools
+      if (Array.isArray(lastReq.tools) && lastReq.tools.length) {
+        var toolsHtml = lastReq.tools.map(function (t) {
+          var nm = t.name || t.type || "tool";
+          var desc = t.description ? " — " + esc(String(t.description).split("\n")[0].slice(0, 120)) : "";
+          return '<div class="tool-list-item"><code>' + esc(nm) + "</code>" + desc + "</div>";
+        }).join("");
+        html += '<div class="section"><details><summary>Tools (' + lastReq.tools.length + ")</summary>" + toolsHtml + "</details></div>";
+      }
+
+      // Transcript
+      html += '<div class="section"><div class="section-label">Transcript</div>';
+      html += renderItems(transcriptItems);
+      if (lastResp && lastResp.error) {
+        html += '<div class="turn kind-other"><div class="turn-head" style="color:var(--error)">Error ' +
+                (lastResp.status ? '<span class="pill err">' + esc(lastResp.status) + "</span>" : "") +
+                '</div><div class="err-msg">' + esc(lastResp.error) + "</div></div>";
+      }
+      html += "</div>";
+
+      // Raw pairs
+      html += '<div class="section"><details><summary>Raw request/response pairs (' + convPairs.length + ")</summary>";
+      for (var p = 0; p < convPairs.length; p++) {
+        var pr = parsedResponses[p];
+        var statusClass = pr.status && pr.status >= 200 && pr.status < 300 ? "ok" : "err";
+        html += '<div style="margin:8px 0;border-top:1px solid var(--border);padding-top:8px">';
+        html += '<div style="font-size:12px;color:var(--text-dim)">#' + (p + 1) + " · " +
+                esc(convPairs[p].request.method) + " " + esc(convPairs[p].request.url) +
+                ' · <span class="pill ' + statusClass + '">' + esc(pr.status === null ? "no response" : pr.status) + "</span>" +
+                " · " + esc(fmtTime(convPairs[p].request.timestamp)) + "</div>";
+        html += '<details><summary>request body</summary><pre class="json">' + esc(prettyJson(convPairs[p].request.body)) + "</pre></details>";
+        if (pr.usage || (pr.items && pr.items.length)) {
+          html += '<details><summary>parsed response output</summary><pre class="json">' + esc(prettyJson(pr.items)) + "</pre></details>";
+        }
+        html += "</div>";
+      }
+      html += "</details></div>";
+
+      html += "</div>"; // conv-body
+
+      var div = document.createElement("div");
+      div.className = "conv";
+      div.innerHTML = html;
+      return div;
+    }
+
+    function renderOther(pair) {
+      var div = document.createElement("div");
+      div.className = "conv collapsed";
+      var status = pair.response ? pair.response.status_code : "—";
+      var head = '<div class="conv-head" data-toggle="conv"><span class="caret">▼</span>' +
+                 '<span class="conv-title">' + esc(pair.request.method) + " " + esc(pair.request.url) + "</span>" +
+                 '<span class="conv-meta"><span class="pill">' + esc(status) + "</span></span></div>";
+      var body = '<div class="conv-body"><div class="section">';
+      if (pair.request.body) body += '<details><summary>request body</summary><pre class="json">' + esc(prettyJson(pair.request.body)) + "</pre></details>";
+      var rb = pair.response && (pair.response.body !== undefined ? pair.response.body : pair.response.body_raw);
+      if (rb !== undefined && rb !== null) {
+        body += '<details><summary>response body</summary><pre class="json">' + esc(typeof rb === "string" ? rb.slice(0, 20000) : prettyJson(rb)) + "</pre></details>";
+      }
+      body += "</div></div>";
+      div.innerHTML = head + body;
+      return div;
+    }
+
+    // ---- Mount ------------------------------------------------------------
+    var root = document.getElementById("root");
+    if (!pairs.length) {
+      root.innerHTML = '<div class="empty">No codex API calls captured.</div>';
+    } else {
+      for (var g = 0; g < order.length; g++) {
+        root.appendChild(renderConversation(order[g], g));
+      }
+      if (otherPairs.length) {
+        var hdr = document.createElement("div");
+        hdr.className = "section-label";
+        hdr.style.margin = "24px 0 8px";
+        hdr.textContent = "Other requests (" + otherPairs.length + ")";
+        root.appendChild(hdr);
+        for (var o = 0; o < otherPairs.length; o++) root.appendChild(renderOther(otherPairs[o]));
+      }
+    }
+
+    // Summary bar
+    var summary = document.getElementById("summary");
+    summary.innerHTML =
+      "<span><b>" + responsePairs.length + "</b> API call" + (responsePairs.length === 1 ? "" : "s") + "</span>" +
+      "<span><b>" + order.length + "</b> conversation" + (order.length === 1 ? "" : "s") + "</span>" +
+      "<span><b>" + fmtNum(totalTokens.total) + "</b> tokens</span>" +
+      (totalTokens.reasoning ? "<span><b>" + fmtNum(totalTokens.reasoning) + "</b> reasoning</span>" : "") +
+      (data.timestamp ? '<span style="color:var(--text-dim)">' + esc(data.timestamp) + "</span>" : "");
+
+    // Toggle handlers (event delegation)
+    document.addEventListener("click", function (e) {
+      var head = e.target.closest && e.target.closest('[data-toggle="conv"]');
+      if (head && !e.target.closest("details")) {
+        head.parentElement.classList.toggle("collapsed");
+      }
+    });
+    document.getElementById("expandAll").addEventListener("click", function () {
+      document.querySelectorAll(".conv").forEach(function (c) { c.classList.remove("collapsed"); });
+    });
+    document.getElementById("collapseAll").addEventListener("click", function () {
+      document.querySelectorAll(".conv").forEach(function (c) { c.classList.add("collapsed"); });
+    });
+  })();
+  </script>
+</body>
+</html>

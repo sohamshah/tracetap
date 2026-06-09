@@ -184,10 +184,87 @@ test("Codex: token totals (incl reasoning + cached) equal raw usage", () => {
   });
 });
 
-test("mixed-agent logs produce one trajectory per wire format", () => {
-  const pairs = [...loadJsonl("claude-tooluse.jsonl"), ...loadJsonl("codex-tooluse.jsonl")];
+test("Gemini: grouped trajectory, model from URL, steps/tools/observations reconstructed", () => {
+  const pairs = loadJsonl("gemini-tooluse.jsonl");
   const trajs = buildTrajectories(pairs);
-  assert.equal(trajs.length, 2);
+
+  assert.equal(trajs.length, 1);
+  const t = trajs[0];
+  assert.equal(t.agent.name, "gemini");
+  // Model id is parsed from the request URL (/models/<model>:method), not the body.
+  assert.equal(t.agent.model, "gemini-2.5-flash");
+
+  // user prompt, agent (thinking + tool call), agent (final answer).
+  assert.equal(t.steps.length, 3);
+  assert.deepEqual(
+    t.steps.map((s) => s.role),
+    ["user", "agent", "agent"],
+  );
+  assert.equal(t.steps[0].message, "List the files please");
+  assert.equal(t.steps[1].reasoningContent, "I should list the files.");
+  assert.equal(t.steps[2].message, "Found two files.");
+
+  assert.equal(countToolCalls(t), 1);
+  assert.equal(countObservations(t), 1);
+});
+
+test("Gemini: functionResponse stitched across pair boundary by id", () => {
+  const pairs = loadJsonl("gemini-tooluse.jsonl");
+  const t = buildTrajectories(pairs)[0];
+
+  const toolStep = t.steps[1];
+  assert.equal(toolStep.toolCalls.length, 1);
+  const call = toolStep.toolCalls[0];
+  assert.equal(call.id, "fc_1");
+  assert.equal(call.name, "list_files");
+  assert.deepEqual(call.arguments, { path: "." });
+
+  assert.ok(toolStep.observation);
+  assert.equal(toolStep.observation.results.length, 1);
+  assert.equal(toolStep.observation.results[0].sourceCallId, "fc_1");
+  assert.equal(toolStep.observation.results[0].content, "a.txt\nb.txt");
+
+  // The final answer step has no observation.
+  assert.equal(t.steps[2].observation, undefined);
+});
+
+test("Gemini: token totals (candidates+thoughts, cached) equal raw usage", () => {
+  const pairs = loadJsonl("gemini-tooluse.jsonl");
+  const t = buildTrajectories(pairs)[0];
+
+  // completionTokens = candidatesTokenCount + thoughtsTokenCount.
+  assert.deepEqual(t.steps[1].metrics, {
+    promptTokens: 100,
+    completionTokens: 20,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 40,
+    reasoningTokens: 8,
+  });
+  assert.deepEqual(t.steps[2].metrics, {
+    promptTokens: 150,
+    completionTokens: 14,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 100,
+    reasoningTokens: 4,
+  });
+
+  assert.deepEqual(t.metrics, {
+    promptTokens: 250,
+    completionTokens: 34,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 140,
+    reasoningTokens: 12,
+  });
+});
+
+test("mixed-agent logs produce one trajectory per wire format", () => {
+  const pairs = [
+    ...loadJsonl("claude-tooluse.jsonl"),
+    ...loadJsonl("codex-tooluse.jsonl"),
+    ...loadJsonl("gemini-tooluse.jsonl"),
+  ];
+  const trajs = buildTrajectories(pairs);
+  assert.equal(trajs.length, 3);
   const names = trajs.map((t) => t.agent.name).sort();
-  assert.deepEqual(names, ["claude", "codex"]);
+  assert.deepEqual(names, ["claude", "codex", "gemini"]);
 });

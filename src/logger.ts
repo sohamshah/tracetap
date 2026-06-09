@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { RawPair } from "./types";
 import { HTMLGenerator } from "./html-generator";
+import { redactPair, type RedactMode } from "./redact";
 
 /**
  * Minimal contract shared by the Anthropic (HTMLGenerator) and codex
@@ -28,6 +29,12 @@ export interface LoggerConfig {
   // Renderer to use for the live/finalized HTML report. Defaults to the
   // Anthropic viewer; the codex tracer injects CodexHTMLGenerator.
   htmlGenerator?: HtmlGenerator;
+  // Body-level secret redaction applied to each pair BEFORE it is persisted
+  // (to the JSONL log, the in-memory pairs, and therefore the HTML/ATIF/stats
+  // derived from them). Opt-in via `--redact-bodies`; defaults to "off" so the
+  // local debug log is byte-faithful unless the user asks otherwise. Header
+  // redaction (redactSensitiveHeaders) is independent and always on.
+  redactBodies?: RedactMode;
 }
 
 const SENSITIVE_HEADER_KEYS = [
@@ -71,10 +78,12 @@ export class TrafficLogger {
   readonly logFile: string;
   readonly htmlFile: string;
   readonly statsFile: string;
+  readonly atifFile: string;
   private readonly pairs: RawPair[] = [];
   private readonly htmlGenerator: HtmlGenerator;
   private readonly enableRealTimeHTML: boolean;
   private readonly includeAllRequests: boolean;
+  private readonly redactBodies: RedactMode;
   private summary?: string;
   private htmlGenInFlight = false;
   private htmlGenPending = false;
@@ -92,9 +101,11 @@ export class TrafficLogger {
     this.logFile = path.join(this.logDir, `${baseName}.jsonl`);
     this.htmlFile = path.join(this.logDir, `${baseName}.html`);
     this.statsFile = path.join(this.logDir, `${baseName}.stats.json`);
+    this.atifFile = path.join(this.logDir, `${baseName}.atif.json`);
     this.htmlGenerator = config.htmlGenerator ?? new HTMLGenerator();
     this.enableRealTimeHTML = config.enableRealTimeHTML ?? true;
     this.includeAllRequests = config.includeAllRequests ?? false;
+    this.redactBodies = config.redactBodies ?? "off";
 
     fs.writeFileSync(this.logFile, "");
   }
@@ -110,6 +121,12 @@ export class TrafficLogger {
   }
 
   recordPair(pair: RawPair): void {
+    // Body-level redaction happens once, here, so the JSONL log, the
+    // in-memory pairs, and every artifact derived from them (HTML, ATIF,
+    // stats, summary) all see the same redacted bytes. No-op when "off".
+    if (this.redactBodies !== "off") {
+      pair = redactPair(pair, { mode: this.redactBodies });
+    }
     this.pairs.push(pair);
     try {
       fs.appendFileSync(this.logFile, JSON.stringify(pair) + "\n");

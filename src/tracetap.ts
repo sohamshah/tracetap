@@ -4,6 +4,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { run as runClaude } from "./claude-cli";
 import { run as runCodex } from "./codex-cli";
+import { run as runGemini } from "./gemini-cli";
 import { runDiff } from "./diff";
 
 const colors = {
@@ -21,6 +22,7 @@ const TOOLS: Record<string, (argv: string[]) => Promise<void>> = {
   claude: runClaude,
   "claude-code": runClaude,
   codex: runCodex,
+  gemini: runGemini,
 };
 
 function version(): string {
@@ -49,22 +51,34 @@ ${colors.yellow}USAGE:${colors.reset}
 ${colors.yellow}TOOLS:${colors.reset}
   claude    Trace Claude Code v2 (proxies ANTHROPIC_BASE_URL)
   codex     Trace the Codex CLI (injects a temporary OpenAI model provider)
+  gemini    Trace the Gemini CLI (proxies GOOGLE_GEMINI_BASE_URL)
 
 ${colors.yellow}COMMANDS:${colors.reset}
   diff <a.jsonl> <b.jsonl>    Structurally diff two captured runs
                               (system prompt, tool defs, model id, shape)
+  index [path...]             Index trace logs into a local cross-session
+                              store (SQLite + FTS5; default: cwd + ~)
+  search "<query>"            Full-text search across every indexed session
+                              (--tool/--model/--agent/--errored/--json, …)
+  explore                     Interactive cross-session command center (Ink TUI):
+                              search · filter · live-tail · diff · ATIF export
+  serve [--port <n>]          Launch a local dashboard (browser UI) over every
+                              indexed session (--host/--db; default :4000)
 
 ${colors.yellow}EXAMPLES:${colors.reset}
   tracetap claude                                  # interactive Claude Code, logged
   tracetap claude --resume
   tracetap codex exec "summarize the repo"
   tracetap codex --log my-session exec -m gpt-5.1 "write tests"
+  tracetap gemini -p "summarize the repo"
   tracetap claude --generate-html .claude-trace/log-….jsonl
   tracetap codex --generate-html .codex-trace/log-….jsonl
+  tracetap gemini --generate-html .gemini-trace/log-….jsonl
 
 ${colors.yellow}OUTPUT:${colors.reset}
   claude → ./.claude-trace/<basename>.{jsonl,html}
   codex  → ./.codex-trace/<basename>.{jsonl,html}
+  gemini → ./.gemini-trace/<basename>.{jsonl,html}
 
 ${colors.yellow}OPTIONS:${colors.reset}
   --help, -h        Show this help
@@ -79,6 +93,32 @@ async function main(): Promise<void> {
   // tool-selector dispatch below.
   if (argv[0] === "diff") {
     await runDiff(argv.slice(1));
+    return;
+  }
+
+  // `index` / `search` drive the local cross-session store. Lazy-loaded so the
+  // native better-sqlite3 dependency is only required when these run.
+  if (argv[0] === "index") {
+    const { runIndex } = await import("./store/cli");
+    await runIndex(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "search") {
+    const { runSearch } = await import("./store/cli");
+    await runSearch(argv.slice(1));
+    return;
+  }
+
+  // `explore` is the interactive cross-session TUI. Lazy-loaded so the Ink /
+  // React / native-sqlite deps only load when the command center runs.
+  if (argv[0] === "explore") {
+    const { runExplore } = await import("./explore/cli");
+    await runExplore(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "serve") {
+    const { runServe } = await import("./store/serve");
+    await runServe(argv.slice(1));
     return;
   }
 

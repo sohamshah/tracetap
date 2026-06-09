@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { RawPair, ClaudeData, HTMLGenerationData } from "./types";
 import { injectSummaryBanner } from "./summary";
+import { analyzeLog, injectStatsStrip } from "./analytics";
 
 const BUNDLE_MARKER = "__CLAUDE_LOGGER_BUNDLE_REPLACEMENT_UNIQUE_9487__";
 const DATA_MARKER = "__CLAUDE_LOGGER_DATA_REPLACEMENT_UNIQUE_9487__";
@@ -77,7 +78,10 @@ export class HTMLGenerator {
         this.escapeHtml(options.title || `${pairs.length} API Calls`),
       );
 
-    const html = injectSummaryBanner(rendered, options.summary);
+    const withSummary = injectSummaryBanner(rendered, options.summary);
+    // Header band with token/cost analytics (mirrors the summary banner's
+    // server-side injection so it works without touching the Lit bundle).
+    const html = injectStatsStrip(withSummary, analyzeLog(pairs));
 
     const outDir = path.dirname(outputFile);
     if (!fs.existsSync(outDir)) {

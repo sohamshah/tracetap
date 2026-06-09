@@ -9,6 +9,9 @@ import { TrafficLogger } from "./logger";
 import { createProxyServer } from "./proxy";
 import { HTMLGenerator } from "./html-generator";
 import { buildSummaryPrompt, claudeSummarySpec, runSummaryCall, buildStats, writeStats } from "./summary";
+import { convertJsonlToAtif, writeAtifFromPairs } from "./atif";
+import { runStatsForFile } from "./analytics";
+import { parseRedactMode, type RedactMode } from "./redact";
 
 const colors = {
   red: "\x1b[0;31m",
@@ -38,6 +41,16 @@ ${colors.yellow}USAGE:${colors.reset}
 
 ${colors.yellow}OPTIONS:${colors.reset}
   --generate-html <file.jsonl> [out.html]   Generate HTML report from a JSONL log
+  --to-atif <file.jsonl> [out.json]         Convert an existing JSONL log to ATIF v1.7 JSON, then exit
+  --format atif                             Also write <basename>.atif.json (ATIF v1.7) at session end
+  --redact-bodies[=standard|strict|off]     Mask secrets (API keys, tokens, JWTs…) in request/response
+                                            bodies. Opt-in on capture (default off → byte-faithful log);
+                                            =standard (default if bare) is high-precision, =strict adds
+                                            entropy-based detectors. Complements header redaction.
+  --no-redact                               Disable body redaction on export (--to-atif / --format atif),
+                                            which otherwise defaults ON. Exports verbatim bodies.
+  --stats <file.jsonl>                      Print token/cost analytics for a log and write a
+                                            <basename>.stats.json sidecar, then exit
   --include-all-requests                    Log every request, not just /v1/messages
   --no-open                                 Do not open the HTML report in browser on exit
   --summarize                               On exit, shell out to \`claude -p\` for a one-paragraph
@@ -57,6 +70,13 @@ ${colors.yellow}EXAMPLES:${colors.reset}
 
 ${colors.yellow}OUTPUT:${colors.reset}
   Logs are saved to .claude-trace/<basename>.{jsonl,html} in the current directory.
+
+${colors.yellow}ATIF NOTE:${colors.reset}
+  ATIF export pins schema_version ATIF-v1.7. agent.tool_definitions is captured
+  verbatim from the request tools[], and Metrics.cached_tokens from the billing
+  cache token counts. logprobs / *_token_ids are omitted (the Anthropic stream
+  does not carry them) — tracetap ATIF is first-class for debugging/viz/SFT and
+  PARTIAL for token-level RL.
 `);
 }
 
@@ -93,6 +113,9 @@ interface RunOpts {
   customClaudePath?: string;
   logBaseName?: string;
   upstreamUrl: string;
+  atifFormat: boolean;
+  redactBodies: RedactMode;
+  atifRedact: RedactMode;
 }
 
 async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
@@ -114,7 +137,12 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
     logBaseName: opts.logBaseName,
     enableRealTimeHTML: true,
     includeAllRequests: opts.includeAllRequests,
+    redactBodies: opts.redactBodies,
   });
+
+  if (opts.redactBodies !== "off") {
+    log(`Body redaction: ${opts.redactBodies} (secrets masked in the log)`, "dim");
+  }
 
   console.log("");
   console.log("Logs will be written to:");
@@ -185,6 +213,16 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
     } catch {
       // ignore
     }
+    if (opts.atifFormat) {
+      try {
+        const { trajectories } = writeAtifFromPairs(logger.rawPairs, logger.atifFile, {
+          redact: opts.atifRedact,
+        });
+        log(`ATIF (v1.7) written to ${logger.atifFile} (${trajectories} trajectory/ies)`, "green");
+      } catch (err) {
+        log(`ATIF export failed: ${(err as Error).message}`, "yellow");
+      }
+    }
     log(`\nLogged ${logger.count} request/response pair(s)`, "green");
     if (opts.openInBrowser && fs.existsSync(logger.htmlFile)) {
       try {
@@ -251,12 +289,42 @@ async function generateHTMLFromCLI(
   }
 }
 
-const TRACE_VALUE_FLAGS = new Set(["--log", "--claude", "--upstream"]);
-const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open", "--summarize"]);
+function convertAtifFromCLI(
+  inputFile: string,
+  outputFile: string | undefined,
+  redact: RedactMode,
+): void {
+  try {
+    const { file, trajectories } = convertJsonlToAtif(inputFile, outputFile, { redact });
+    const note = redact === "off" ? " (bodies NOT redacted)" : ` (bodies redacted: ${redact})`;
+    log(`Generated ${file} (ATIF v1.7, ${trajectories} trajectory/ies)${note}`, "green");
+    process.exit(0);
+  } catch (err) {
+    log(`Error: ${(err as Error).message}`, "red");
+    process.exit(1);
+  }
+}
+
+function runStatsFromCLI(inputFile: string): void {
+  try {
+    const { statsFile, table } = runStatsForFile(inputFile);
+    console.log(table);
+    log(`\nStats written to ${statsFile}`, "green");
+    process.exit(0);
+  } catch (err) {
+    log(`Error: ${(err as Error).message}`, "red");
+    process.exit(1);
+  }
+}
+
+const TRACE_VALUE_FLAGS = new Set(["--log", "--claude", "--upstream", "--format"]);
+const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open", "--summarize", "--no-redact"]);
 
 interface ParsedArgs {
   trace: Record<string, string | boolean>;
   generateHtml?: { input: string; output?: string };
+  toAtif?: { input: string; output?: string };
+  statsInput?: string;
   claudeArgs: string[];
   help: boolean;
 }
@@ -265,6 +333,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   const trace: Record<string, string | boolean> = {};
   const claudeArgs: string[] = [];
   let generateHtml: ParsedArgs["generateHtml"];
+  let toAtif: ParsedArgs["toAtif"];
+  let statsInput: string | undefined;
   let help = false;
 
   const runWithIdx = argv.indexOf("--run-with");
@@ -293,6 +363,36 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
+    if (a === "--to-atif") {
+      const input = front[i + 1];
+      let output: string | undefined;
+      let consumed = 1;
+      const next = front[i + 2];
+      if (next && !next.startsWith("--")) {
+        output = next;
+        consumed = 2;
+      }
+      toAtif = { input, output };
+      i += consumed;
+      continue;
+    }
+
+    if (a === "--stats") {
+      statsInput = front[i + 1];
+      i++;
+      continue;
+    }
+
+    // `--redact-bodies` takes an optional inline `=mode`; bare means "standard".
+    if (a === "--redact-bodies") {
+      trace["--redact-bodies"] = true;
+      continue;
+    }
+    if (a.startsWith("--redact-bodies=")) {
+      trace["--redact-bodies"] = a.slice("--redact-bodies=".length);
+      continue;
+    }
+
     if (TRACE_BOOL_FLAGS.has(a)) {
       trace[a] = true;
       continue;
@@ -308,7 +408,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   claudeArgs.push(...tail);
-  return { trace, generateHtml, claudeArgs, help };
+  return { trace, generateHtml, toAtif, statsInput, claudeArgs, help };
 }
 
 export async function run(argv: string[]): Promise<void> {
@@ -328,6 +428,38 @@ export async function run(argv: string[]): Promise<void> {
     (parsed.trace["--upstream"] as string | undefined) ||
     process.env.ANTHROPIC_BASE_URL ||
     "https://api.anthropic.com";
+
+  const atifFormat = (parsed.trace["--format"] as string | undefined) === "atif";
+
+  // Redaction policy. `--no-redact` is an explicit "export verbatim" override.
+  // `--redact-bodies[=mode]` opts capture in (default off) and overrides the
+  // export mode. Export (--to-atif / --format atif) defaults redaction ON.
+  const noRedact = parsed.trace["--no-redact"] === true;
+  const redactFlag = parsed.trace["--redact-bodies"];
+  const redactBodies: RedactMode = noRedact ? "off" : parseRedactMode(redactFlag);
+  const atifRedact: RedactMode = noRedact
+    ? "off"
+    : redactFlag !== undefined
+      ? parseRedactMode(redactFlag)
+      : "standard";
+
+  if (parsed.toAtif) {
+    if (!parsed.toAtif.input) {
+      log("Missing input file for --to-atif", "red");
+      process.exit(1);
+    }
+    convertAtifFromCLI(parsed.toAtif.input, parsed.toAtif.output, atifRedact);
+    return;
+  }
+
+  if (parsed.statsInput !== undefined) {
+    if (!parsed.statsInput) {
+      log("Missing input file for --stats", "red");
+      process.exit(1);
+    }
+    runStatsFromCLI(parsed.statsInput);
+    return;
+  }
 
   if (parsed.generateHtml) {
     if (!parsed.generateHtml.input) {
@@ -351,6 +483,9 @@ export async function run(argv: string[]): Promise<void> {
     customClaudePath,
     logBaseName,
     upstreamUrl,
+    atifFormat,
+    redactBodies,
+    atifRedact,
   });
 }
 

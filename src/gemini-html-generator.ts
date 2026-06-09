@@ -1,25 +1,27 @@
 import * as fs from "fs";
 import * as path from "path";
 import { RawPair, ClaudeData } from "./types";
-import { injectSummaryBanner } from "./summary";
-import { analyzeLog, injectStatsStrip } from "./analytics";
 
-// Markers in frontend/codex-template.html replaced at generation time.
-const DATA_MARKER = "__CODEX_DATA__";
-const TITLE_MARKER = "__CODEX_TITLE__";
+// Markers in frontend/gemini-template.html replaced at generation time.
+const DATA_MARKER = "__GEMINI_DATA__";
+const TITLE_MARKER = "__GEMINI_TITLE__";
 
 /**
- * Renders captured OpenAI Responses API request/response pairs (as emitted by
- * the codex CLI) into a self-contained HTML viewer. Unlike the Anthropic
- * HTMLGenerator this needs no external JS bundle — the viewer is inlined in
- * frontend/codex-template.html.
+ * Renders captured Google Gemini (Generative Language API) request/response
+ * pairs (as emitted by the Gemini CLI) into a self-contained HTML viewer. Like
+ * the codex viewer it needs no external JS bundle — the renderer is inlined in
+ * frontend/gemini-template.html. It reconstructs each conversation from the
+ * request `contents[]` transcript plus the merged streamed `candidates[]`
+ * output, rendering thinking, tool calls, tool responses, the final model
+ * message, and per-conversation token usage (prompt / output / thinking /
+ * cached).
  */
-export class CodexHTMLGenerator {
+export class GeminiHTMLGenerator {
   private readonly templatePath: string;
 
   constructor() {
     const frontendDir = path.join(__dirname, "..", "frontend");
-    this.templatePath = path.join(frontendDir, "codex-template.html");
+    this.templatePath = path.join(frontendDir, "gemini-template.html");
   }
 
   private escapeHtml(text: string): string {
@@ -32,26 +34,21 @@ export class CodexHTMLGenerator {
   }
 
   private prepareData(pairs: RawPair[], timestamp: string, includeAllRequests: boolean): string {
-    const codexData: ClaudeData = {
+    const geminiData: ClaudeData = {
       rawPairs: pairs,
       timestamp,
       metadata: { includeAllRequests },
     };
-    return Buffer.from(JSON.stringify(codexData), "utf-8").toString("base64");
+    return Buffer.from(JSON.stringify(geminiData), "utf-8").toString("base64");
   }
 
   async generateHTML(
     pairs: RawPair[],
     outputFile: string,
-    options: {
-      title?: string;
-      timestamp?: string;
-      includeAllRequests?: boolean;
-      summary?: string;
-    } = {},
+    options: { title?: string; timestamp?: string; includeAllRequests?: boolean } = {},
   ): Promise<void> {
     if (!fs.existsSync(this.templatePath)) {
-      throw new Error(`Codex template not found at ${this.templatePath}.`);
+      throw new Error(`Gemini template not found at ${this.templatePath}.`);
     }
     const template = fs.readFileSync(this.templatePath, "utf-8");
 
@@ -62,11 +59,7 @@ export class CodexHTMLGenerator {
 
     // split() rather than replace(): the base64 data block can be large, and
     // replace() with a large replacement string is needlessly quadratic.
-    const rendered = template.split(DATA_MARKER).join(dataB64).split(TITLE_MARKER).join(title);
-    const withSummary = injectSummaryBanner(rendered, options.summary);
-    // Header band with token/cost analytics, rendered server-side into the
-    // inline template (same injection point as the summary banner).
-    const html = injectStatsStrip(withSummary, analyzeLog(pairs));
+    const html = template.split(DATA_MARKER).join(dataB64).split(TITLE_MARKER).join(title);
 
     const outDir = path.dirname(outputFile);
     if (!fs.existsSync(outDir)) {

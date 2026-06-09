@@ -11,7 +11,12 @@ export interface HtmlGenerator {
   generateHTML(
     pairs: RawPair[],
     outputFile: string,
-    options?: { title?: string; timestamp?: string; includeAllRequests?: boolean },
+    options?: {
+      title?: string;
+      timestamp?: string;
+      includeAllRequests?: boolean;
+      summary?: string;
+    },
   ): Promise<void>;
 }
 
@@ -28,6 +33,7 @@ export interface LoggerConfig {
 const SENSITIVE_HEADER_KEYS = [
   "authorization",
   "x-api-key",
+  "x-goog-api-key",
   "x-auth-token",
   "cookie",
   "set-cookie",
@@ -64,10 +70,12 @@ export class TrafficLogger {
   private readonly logDir: string;
   readonly logFile: string;
   readonly htmlFile: string;
+  readonly statsFile: string;
   private readonly pairs: RawPair[] = [];
   private readonly htmlGenerator: HtmlGenerator;
   private readonly enableRealTimeHTML: boolean;
   private readonly includeAllRequests: boolean;
+  private summary?: string;
   private htmlGenInFlight = false;
   private htmlGenPending = false;
 
@@ -83,11 +91,22 @@ export class TrafficLogger {
 
     this.logFile = path.join(this.logDir, `${baseName}.jsonl`);
     this.htmlFile = path.join(this.logDir, `${baseName}.html`);
+    this.statsFile = path.join(this.logDir, `${baseName}.stats.json`);
     this.htmlGenerator = config.htmlGenerator ?? new HTMLGenerator();
     this.enableRealTimeHTML = config.enableRealTimeHTML ?? true;
     this.includeAllRequests = config.includeAllRequests ?? false;
 
     fs.writeFileSync(this.logFile, "");
+  }
+
+  /** The captured pairs so far (used to build the trajectory / summary). */
+  get rawPairs(): RawPair[] {
+    return this.pairs;
+  }
+
+  /** Set the session summary to embed in the next HTML generation. */
+  setSummary(summary: string): void {
+    this.summary = summary;
   }
 
   recordPair(pair: RawPair): void {
@@ -113,6 +132,7 @@ export class TrafficLogger {
         title: `${this.pairs.length} API Calls`,
         timestamp: new Date().toISOString().replace("T", " ").slice(0, -5),
         includeAllRequests: this.includeAllRequests,
+        summary: this.summary,
       })
       .catch(() => {})
       .finally(() => {
@@ -124,12 +144,13 @@ export class TrafficLogger {
       });
   }
 
-  finalize(): void {
+  async finalize(): Promise<void> {
     try {
-      void this.htmlGenerator.generateHTML(this.pairs, this.htmlFile, {
+      await this.htmlGenerator.generateHTML(this.pairs, this.htmlFile, {
         title: `${this.pairs.length} API Calls`,
         timestamp: new Date().toISOString().replace("T", " ").slice(0, -5),
         includeAllRequests: this.includeAllRequests,
+        summary: this.summary,
       });
     } catch {
       // ignore

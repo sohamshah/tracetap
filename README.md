@@ -180,6 +180,7 @@ Run as `tracetap claude [flag…] [claude args…]`.
 | `--generate-html <jsonl>`  | Render a JSONL log to HTML and exit. Optional `[output.html]`.  |
 | `--include-all-requests`   | Log every request, not just `/v1/messages`.                      |
 | `--no-open`                | Don't open the HTML report in browser when the session ends.    |
+| `--summarize`              | On exit, shell out to `claude -p` for a one-paragraph session summary (added to the report header + a `.stats.json`). Off by default. Uses your existing plan — no extra API key — and the summary call is not itself traced. |
 | `--log <name>`             | Custom log basename (no extension).                             |
 | `--claude <path>`          | Override path to the `claude` binary (default: `which claude`). |
 | `--upstream <url>`         | Override the upstream API base.                                 |
@@ -239,6 +240,7 @@ Run as `tracetap codex [flag…] [codex args…]`.
 | `--generate-html <jsonl>`  | Render a JSONL log to HTML and exit. Optional `[output.html]`.   |
 | `--include-all-requests`   | Log every request, not just `/responses`.                        |
 | `--no-open`                | Don't open the HTML report in browser when the session ends.     |
+| `--summarize`              | On exit, shell out to `codex exec` for a one-paragraph session summary (added to the report header + a `.stats.json`). Off by default. Uses your existing plan — no extra API key — and the summary call is not itself traced. |
 | `--log <name>`             | Custom log basename (no extension).                              |
 | `--codex <path>`           | Override path to the `codex` binary (default: `which codex`).    |
 | `--upstream <url>`         | Override the upstream API base (default: `https://api.openai.com`). |

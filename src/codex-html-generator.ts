@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { RawPair, ClaudeData } from "./types";
+import { injectSummaryBanner } from "./summary";
 
 // Markers in frontend/codex-template.html replaced at generation time.
 const DATA_MARKER = "__CODEX_DATA__";
@@ -41,7 +42,12 @@ export class CodexHTMLGenerator {
   async generateHTML(
     pairs: RawPair[],
     outputFile: string,
-    options: { title?: string; timestamp?: string; includeAllRequests?: boolean } = {},
+    options: {
+      title?: string;
+      timestamp?: string;
+      includeAllRequests?: boolean;
+      summary?: string;
+    } = {},
   ): Promise<void> {
     if (!fs.existsSync(this.templatePath)) {
       throw new Error(`Codex template not found at ${this.templatePath}.`);
@@ -55,7 +61,8 @@ export class CodexHTMLGenerator {
 
     // split() rather than replace(): the base64 data block can be large, and
     // replace() with a large replacement string is needlessly quadratic.
-    const html = template.split(DATA_MARKER).join(dataB64).split(TITLE_MARKER).join(title);
+    const rendered = template.split(DATA_MARKER).join(dataB64).split(TITLE_MARKER).join(title);
+    const html = injectSummaryBanner(rendered, options.summary);
 
     const outDir = path.dirname(outputFile);
     if (!fs.existsSync(outDir)) {

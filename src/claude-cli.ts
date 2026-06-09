@@ -8,6 +8,7 @@ import { URL } from "url";
 import { TrafficLogger } from "./logger";
 import { createProxyServer } from "./proxy";
 import { HTMLGenerator } from "./html-generator";
+import { buildSummaryPrompt, claudeSummarySpec, runSummaryCall, buildStats, writeStats } from "./summary";
 
 const colors = {
   red: "\x1b[0;31m",
@@ -39,6 +40,8 @@ ${colors.yellow}OPTIONS:${colors.reset}
   --generate-html <file.jsonl> [out.html]   Generate HTML report from a JSONL log
   --include-all-requests                    Log every request, not just /v1/messages
   --no-open                                 Do not open the HTML report in browser on exit
+  --summarize                               On exit, shell out to \`claude -p\` for a one-paragraph
+                                            session summary (uses your existing plan, no extra key)
   --log <name>                              Custom log base name (no extension)
   --claude <path>                           Override path to the claude binary
   --upstream <url>                          Override upstream API base (default: https://api.anthropic.com)
@@ -86,6 +89,7 @@ interface RunOpts {
   claudeArgs: string[];
   includeAllRequests: boolean;
   openInBrowser: boolean;
+  summarize: boolean;
   customClaudePath?: string;
   logBaseName?: string;
   upstreamUrl: string;
@@ -146,12 +150,38 @@ async function runClaudeWithProxy(opts: RunOpts): Promise<void> {
 
   const cleanup = async () => {
     try {
-      logger.finalize();
+      await close();
     } catch {
       // ignore
     }
+    if (opts.summarize) {
+      try {
+        const prompt = buildSummaryPrompt(logger.rawPairs);
+        if (prompt) {
+          log("Generating session summary via `claude -p` …", "dim");
+          // Clean env: only ever strip the override if it points at our proxy,
+          // so the summary call runs on the user's real plan and is not traced.
+          const summaryEnv = { ...process.env };
+          if (summaryEnv.ANTHROPIC_BASE_URL === proxyUrl) delete summaryEnv.ANTHROPIC_BASE_URL;
+          const summary = await runSummaryCall(claudeSummarySpec(claudePath), prompt, {
+            cwd: process.cwd(),
+            env: summaryEnv,
+          });
+          if (summary) {
+            logger.setSummary(summary);
+            log("Session summary added to report.", "green");
+          } else {
+            log("Session summary unavailable (no output from summary call).", "yellow");
+          }
+          writeStats(logger.statsFile, buildStats(logger.rawPairs, summary));
+          log(`Stats written to ${logger.statsFile}`, "dim");
+        }
+      } catch (err) {
+        log(`Summary generation failed: ${(err as Error).message}`, "yellow");
+      }
+    }
     try {
-      await close();
+      await logger.finalize();
     } catch {
       // ignore
     }
@@ -222,7 +252,7 @@ async function generateHTMLFromCLI(
 }
 
 const TRACE_VALUE_FLAGS = new Set(["--log", "--claude", "--upstream"]);
-const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open"]);
+const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open", "--summarize"]);
 
 interface ParsedArgs {
   trace: Record<string, string | boolean>;
@@ -291,6 +321,7 @@ export async function run(argv: string[]): Promise<void> {
 
   const includeAllRequests = parsed.trace["--include-all-requests"] === true;
   const openInBrowser = parsed.trace["--no-open"] !== true;
+  const summarize = parsed.trace["--summarize"] === true;
   const customClaudePath = parsed.trace["--claude"] as string | undefined;
   const logBaseName = parsed.trace["--log"] as string | undefined;
   const upstreamUrl =
@@ -316,6 +347,7 @@ export async function run(argv: string[]): Promise<void> {
     claudeArgs: parsed.claudeArgs,
     includeAllRequests,
     openInBrowser,
+    summarize,
     customClaudePath,
     logBaseName,
     upstreamUrl,

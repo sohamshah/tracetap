@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { RawPair, ClaudeData, HTMLGenerationData } from "./types";
+import { injectSummaryBanner } from "./summary";
 
 const BUNDLE_MARKER = "__CLAUDE_LOGGER_BUNDLE_REPLACEMENT_UNIQUE_9487__";
 const DATA_MARKER = "__CLAUDE_LOGGER_DATA_REPLACEMENT_UNIQUE_9487__";
@@ -47,7 +48,12 @@ export class HTMLGenerator {
   async generateHTML(
     pairs: RawPair[],
     outputFile: string,
-    options: { title?: string; timestamp?: string; includeAllRequests?: boolean } = {},
+    options: {
+      title?: string;
+      timestamp?: string;
+      includeAllRequests?: boolean;
+      summary?: string;
+    } = {},
   ): Promise<void> {
     const { htmlTemplate, jsBundle } = this.loadFiles();
 
@@ -64,12 +70,14 @@ export class HTMLGenerator {
       throw new Error("Template bundle marker not found");
     }
 
-    const html = (parts[0] + jsBundle + parts[1])
+    const rendered = (parts[0] + jsBundle + parts[1])
       .replace(DATA_MARKER, dataB64)
       .replace(
         TITLE_MARKER,
         this.escapeHtml(options.title || `${pairs.length} API Calls`),
       );
+
+    const html = injectSummaryBanner(rendered, options.summary);
 
     const outDir = path.dirname(outputFile);
     if (!fs.existsSync(outDir)) {

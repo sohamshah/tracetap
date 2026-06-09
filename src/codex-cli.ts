@@ -7,6 +7,7 @@ import { URL } from "url";
 import { TrafficLogger } from "./logger";
 import { createProxyServer } from "./proxy";
 import { CodexHTMLGenerator } from "./codex-html-generator";
+import { buildSummaryPrompt, codexSummarySpec, runSummaryCall, buildStats, writeStats } from "./summary";
 
 const colors = {
   red: "\x1b[0;31m",
@@ -44,6 +45,8 @@ ${colors.yellow}OPTIONS:${colors.reset}
   --generate-html <file.jsonl> [out.html]   Generate HTML report from a JSONL log
   --include-all-requests                    Log every request, not just /responses
   --no-open                                 Do not open the HTML report in browser on exit
+  --summarize                               On exit, shell out to \`codex exec\` for a one-paragraph
+                                            session summary (uses your existing plan, no extra key)
   --log <name>                              Custom log base name (no extension)
   --codex <path>                            Override path to the codex binary
   --upstream <url>                          Override upstream API base (default: https://api.openai.com)
@@ -96,6 +99,7 @@ interface RunOpts {
   codexArgs: string[];
   includeAllRequests: boolean;
   openInBrowser: boolean;
+  summarize: boolean;
   customCodexPath?: string;
   logBaseName?: string;
   upstreamUrl: string;
@@ -183,12 +187,37 @@ async function runCodexWithProxy(opts: RunOpts): Promise<void> {
 
   const cleanup = async () => {
     try {
-      logger.finalize();
+      await close();
     } catch {
       // ignore
     }
+    if (opts.summarize) {
+      try {
+        const prompt = buildSummaryPrompt(logger.rawPairs);
+        if (prompt) {
+          log("Generating session summary via `codex exec` …", "dim");
+          // The summary call runs plain `codex exec` with no injected model
+          // provider, so it never routes through (and is never captured by)
+          // our proxy — process.env carries no proxy override.
+          const summary = await runSummaryCall(codexSummarySpec(codexPath), prompt, {
+            cwd: process.cwd(),
+            env: process.env,
+          });
+          if (summary) {
+            logger.setSummary(summary);
+            log("Session summary added to report.", "green");
+          } else {
+            log("Session summary unavailable (no output from summary call).", "yellow");
+          }
+          writeStats(logger.statsFile, buildStats(logger.rawPairs, summary));
+          log(`Stats written to ${logger.statsFile}`, "dim");
+        }
+      } catch (err) {
+        log(`Summary generation failed: ${(err as Error).message}`, "yellow");
+      }
+    }
     try {
-      await close();
+      await logger.finalize();
     } catch {
       // ignore
     }
@@ -259,7 +288,7 @@ async function generateHTMLFromCLI(
 }
 
 const TRACE_VALUE_FLAGS = new Set(["--log", "--codex", "--upstream", "--env-key"]);
-const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open"]);
+const TRACE_BOOL_FLAGS = new Set(["--include-all-requests", "--no-open", "--summarize"]);
 
 interface ParsedArgs {
   trace: Record<string, string | boolean>;
@@ -328,6 +357,7 @@ export async function run(argv: string[]): Promise<void> {
 
   const includeAllRequests = parsed.trace["--include-all-requests"] === true;
   const openInBrowser = parsed.trace["--no-open"] !== true;
+  const summarize = parsed.trace["--summarize"] === true;
   const customCodexPath = parsed.trace["--codex"] as string | undefined;
   const logBaseName = parsed.trace["--log"] as string | undefined;
   const envKey = (parsed.trace["--env-key"] as string | undefined) || "OPENAI_API_KEY";
@@ -352,6 +382,7 @@ export async function run(argv: string[]): Promise<void> {
     codexArgs: parsed.codexArgs,
     includeAllRequests,
     openInBrowser,
+    summarize,
     customCodexPath,
     logBaseName,
     upstreamUrl,

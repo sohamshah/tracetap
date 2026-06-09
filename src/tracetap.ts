@@ -4,6 +4,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { run as runClaude } from "./claude-cli";
 import { run as runCodex } from "./codex-cli";
+import { runDiff } from "./diff";
 
 const colors = {
   blue: "\x1b[0;34m",
@@ -49,6 +50,10 @@ ${colors.yellow}TOOLS:${colors.reset}
   claude    Trace Claude Code v2 (proxies ANTHROPIC_BASE_URL)
   codex     Trace the Codex CLI (injects a temporary OpenAI model provider)
 
+${colors.yellow}COMMANDS:${colors.reset}
+  diff <a.jsonl> <b.jsonl>    Structurally diff two captured runs
+                              (system prompt, tool defs, model id, shape)
+
 ${colors.yellow}EXAMPLES:${colors.reset}
   tracetap claude                                  # interactive Claude Code, logged
   tracetap claude --resume
@@ -69,6 +74,13 @@ ${colors.yellow}OPTIONS:${colors.reset}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // `diff` is a standalone command (no proxy / harness), handled before the
+  // tool-selector dispatch below.
+  if (argv[0] === "diff") {
+    await runDiff(argv.slice(1));
+    return;
+  }
 
   // Top-level help/version only when they appear before any tool selector.
   // (`tracetap codex --help` is forwarded so the codex tracer shows its help.)

@@ -59,7 +59,7 @@ export interface AuditReport {
   totalResponse: number;
   /**
    * Redaction simulation: of all detected occurrences, how many would the
-   * capture-time `--redact standard` / `--redact strict` passes have masked?
+   * capture-time `--redact-bodies` / `--redact-bodies=strict` passes have masked?
    */
   redactCheck?: { standardMasked: number; strictMasked: number; total: number };
 }
@@ -371,9 +371,9 @@ export async function runAudit(argv: string[]): Promise<void> {
     if (report.redactCheck) {
       const rc = report.redactCheck;
       console.log(
-        `${dim}redact-check: --redact standard would mask ${rc.standardMasked}, ` +
-          `--redact strict ${rc.strictMasked} (of ${rc.total} detected occurrence(s)).\n` +
-          `Capture with 'tracetap claude --redact standard' to mask at write time.${reset}`,
+        `${dim}redact-check: --redact-bodies would mask ${rc.standardMasked}, ` +
+          `--redact-bodies=strict ${rc.strictMasked} (of ${rc.total} detected occurrence(s)).\n` +
+          `Capture with 'tracetap claude --redact-bodies' to mask at write time.${reset}`,
       );
     }
   }

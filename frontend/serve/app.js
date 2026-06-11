@@ -847,10 +847,10 @@
     }
 
     if (r.redactCheck) {
-      html += '<div class="note">redact-check: capture-time <code>--redact standard</code> would mask ' +
-        r.redactCheck.standardMasked + ", <code>--redact strict</code> " + r.redactCheck.strictMasked +
+      html += '<div class="note">redact-check: capture-time <code>--redact-bodies</code> would mask ' +
+        r.redactCheck.standardMasked + ", <code>--redact-bodies=strict</code> " + r.redactCheck.strictMasked +
         " of " + r.redactCheck.total + " detected occurrence(s). " +
-        "Capture with <code>tracetap claude --redact standard</code> to mask at write time.</div>";
+        "Capture with <code>tracetap claude --redact-bodies</code> to mask at write time.</div>";
     }
     body.innerHTML = html;
   }

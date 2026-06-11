@@ -1,6 +1,6 @@
 # tracetap
 
-Capture the full **trajectory** of a coding-agent harness — every API call it makes, with request bodies, system prompts, tool definitions, streaming responses, and token usage — into a JSONL log and a self-contained HTML viewer.
+Capture the full **trajectory** of a coding-agent harness — every API call it makes, with request bodies, system prompts, tool definitions, streaming responses, and token usage — into a JSONL log and a self-contained HTML viewer. Then put the captures to work: a cross-session index with full-text search, a local **observatory** dashboard (per-request waterfalls, context/compaction forensics, fleet analytics, a system-prompt registry with version diffs), wire-exact **usage & spend reports**, and an **egress secret audit** that knows exactly what left the machine.
 
 One command, a tool selector, and your normal agent invocation:
 
@@ -38,6 +38,12 @@ tracetap codex exec "summarize this repo"    # non-interactive codex run
 tracetap codex "refactor this module"        # interactive codex session
 tracetap gemini -p "summarize this repo"     # non-interactive gemini run
 tracetap claude --generate-html log.jsonl    # re-render an existing log into HTML
+
+tracetap index                               # fold all logs into the local store
+tracetap serve                               # local observatory dashboard (browser)
+tracetap usage                               # daily token & spend report
+tracetap audit                               # what secrets crossed the wire?
+tracetap search "rate limit retry"           # full-text search across sessions
 ```
 
 Everything after the `<tool>` selector is handled by that tool's tracer: a small set of trace flags (below), and **any flag we don't recognize is forwarded verbatim to the underlying binary** — so most `claude`/`codex`/`gemini` invocations work just by prefixing them with `tracetap claude`/`tracetap codex`/`tracetap gemini`. Trace flags may also go *before* the tool (`tracetap --log demo codex exec …`). Use `--run-with` if an agent flag ever collides with one of ours.
@@ -351,7 +357,54 @@ ballpark, not a billing source.
 - The table is **overridable** programmatically: `analyze(traj, { prices })` and
   `analyzeLog(pairs, { prices })` accept a custom `PriceTable` to merge/replace
   the defaults for exact accounting.
+- The `usage`/`index`/`serve` commands go further and use a **live price table**
+  (next section) — the static table is only the last-resort fallback.
 
+## Usage & spend reports (`tracetap usage`)
+
+A ccusage-style report over **wire-exact** token counts — the usage figures come
+from each API response itself (including cache write/read splits), not from
+re-tokenizing session files. Reads the cross-session index (run
+`tracetap index` first).
+
+```bash
+tracetap usage                          # daily table, last 30 days
+tracetap usage daily --since 7d --breakdown
+tracetap usage monthly --json
+tracetap usage --statusline             # "$0.42 today · $12.30 mtd" for shell prompts
+```
+
+```
+$ tracetap usage --since 7d
+BUCKET      GROUP                  IN   OUT  CACHE R  CACHE W  SESS   COST
+2026-06-09  claude               1.3K   160      690       50     3  $0.02
+2026-06-10  claude,codex         9.1K  2.4K     48.2M     1.2M    11  $4.31
+2026-06-11  claude               2.0K   880     12.9M     310K     4  $1.12
+total                           12.4K  3.4K     61.8M     1.6M    18  $5.45
+prices: litellm-cache
+```
+
+| Option | Effect |
+| --- | --- |
+| `daily` \| `weekly` \| `monthly` \| `total` | Bucket granularity (default `daily`; weeks are ISO-8601) |
+| `--breakdown` | One row per model within each bucket |
+| `--since` / `--until <when>` | `YYYY-MM-DD`, `today`, `yesterday`, or `<N>d` |
+| `--agent` / `--model` / `--project` | Filter the events |
+| `--timezone <iana>` | Bucket-boundary timezone (default: system local) |
+| `--json` | Structured report for scripting |
+| `--statusline` | One-line today + month-to-date spend |
+| `--offline` | Never fetch prices (cache/builtin only) |
+| `--refresh-prices` | Re-fetch the price table even if the cache is fresh |
+| `--db <path>` | Use a different index database |
+
+**Live pricing.** Costs are priced from [LiteLLM's community price
+table](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json),
+cached at `~/.tracetap/prices.json` (7-day TTL) and merged over the built-in
+defaults. Degradation order: fresh cache → network fetch → stale cache →
+built-ins — fully offline-safe. Costs are **re-priced at read time** from raw
+token counts, so a stale index never locks in stale prices; models missing
+from every table are flagged (`$…+`, `unpriced models excluded`) instead of
+silently under-counting.
 
 ## ATIF export
 
@@ -401,6 +454,17 @@ Indexing is **idempotent and watermarked**: each source file's content hash is
 recorded, so re-running `tracetap index` is a cheap no-op for unchanged logs and
 only re-mines what actually changed.
 
+Beyond the searchable transcript, indexing extracts **wire-level metrics** the
+session files of other tools can't see: one row per API call (latency,
+time-to-first-byte, HTTP status, stop reason, exact billed token splits,
+transcript size — failed and never-answered calls included), one usage event
+per agent turn (powers `tracetap usage`), and a content-addressed registry of
+every distinct **system prompt** seen on the wire. Index-time cost estimates
+use the live price table (`--offline` to skip the fetch). The whole database is
+derived data: on a schema upgrade it is dropped and rebuilt from your `.jsonl`
+logs on the next `tracetap index` — nothing to migrate, the logs are the source
+of truth.
+
 `tracetap search` returns ranked hits (FTS5 BM25) showing the session id, step
 number, a highlighted snippet, and the stitched tool_call ↔ observation. Filters:
 
@@ -423,16 +487,17 @@ offline with nothing else installed. Semantic (embedding) search is intentionall
 left as an opt-in follow-up so tracetap never pulls in a model daemon or its
 several-hundred-MB footprint by default.
 
-### Local dashboard (`tracetap serve`)
+### Local observatory (`tracetap serve`)
 
-Prefer a browser to the terminal? `tracetap serve` starts a tiny local web UI
-over the same index — one page that lists, sorts, filters and full-text-searches
-**every** indexed session, instead of one HTML file per run. It is read-only and
-dependency-light (Node's built-in HTTP server only — no framework, no auth, no
-cloud), and binds to `127.0.0.1` by default.
+`tracetap serve` starts the **observatory** — a local web dashboard over the
+same index. It is read-only and dependency-light (Node's built-in HTTP server
+only — no framework, no build step, no auth, no cloud), binds to `127.0.0.1`
+by default, and serves ONE self-contained page (all CSS/JS inlined, dark/light
+theme). An SSE stream watches the index database, so running `tracetap index`
+in another terminal live-refreshes whatever view is open.
 
 ```bash
-# Serve the dashboard at http://127.0.0.1:4000
+# Serve the observatory at http://127.0.0.1:4000
 tracetap serve
 
 # Pick a port / bind address / index database
@@ -445,17 +510,86 @@ tracetap serve --port 8080 --host 127.0.0.1 --db ~/.tracetap/index.db
 | `--host <addr>` | Address to bind (default `127.0.0.1`) |
 | `--db <path>` | Index database to read (default `~/.tracetap/index.db`) |
 
-The page shows each session's agent, model, start time, duration, in/out tokens,
-estimated cost and a tool-usage summary; the search box runs the same FTS5/BM25
-query as `tracetap search`. Clicking a row opens that session's existing
-self-contained HTML report (the `.html` sibling of its source log). Routes:
+Five views:
+
+- **Sessions** — sortable wire-metric table (duration, in/out tokens, cache-hit
+  rate, errors, cost) over every indexed session; the search box switches to
+  ranked FTS5 hits (same engine as `tracetap search`). Click through to…
+- **Session detail** — the flight-recorder view of one session: stat cards
+  (cost, TTFT p50, cache hit, compactions), a **context-growth lane**
+  (transcript items per call, compactions flagged), a stacked **token-flow
+  lane** (cache read/write vs fresh input vs output per call), a
+  **request waterfall** (per-call bars segmented into waiting-for-first-byte vs
+  streaming, with HTTP status and stop reason), and the full collapsible
+  transcript (reasoning, tool inputs, observations). Links to the session's
+  original self-contained HTML wire report when it exists on disk.
+- **Usage** — the `tracetap usage` report in chart + table form (granularity,
+  per-model breakdown, date range).
+- **Analytics** — fleet rollups: total cost / cache-hit rate / call error rate,
+  daily cost trend, **per-model wire latency** (TTFT p50/p95, duration p50,
+  error rate — measured from your own traffic, not provider status pages), per
+  agent totals, top tools, top sessions by cost, mid-task compaction counts.
+- **Prompts** — the system-prompt registry: every distinct prompt version seen
+  on the wire (content-addressed; volatile fragments normalized away), with
+  usage counts and a **line diff between any two versions** — see exactly what
+  changed when a harness update rewrites its prompt.
+- **Audit** — the `tracetap audit` report (next section) over all indexed logs.
+
+JSON API (everything the UI uses is scriptable):
 
 | Route | Returns |
 | --- | --- |
 | `GET /` | The self-contained dashboard page (inline CSS/JS) |
-| `GET /api/sessions` | JSON session list (`agent`/`model`/`project` filters, `sort`/`order`) |
-| `GET /api/search?q=…` | JSON FTS5 search hits (`tool`/`agent`/`model`/`project`/`errored` filters) |
-| `GET /report?session=<id>` | The session's HTML report, or a `404` if it isn't on disk |
+| `GET /api/meta` | DB path, row counts, price source |
+| `GET /api/sessions` | Session list (`agent`/`model`/`project`/`tool`/`errored` filters, `sort`/`order`) |
+| `GET /api/search?q=…` | FTS5 search hits (`tool`/`agent`/`model`/`project`/`errored` filters) |
+| `GET /api/session/<id>` | One session: summary + transcript steps + per-request wire rows + compactions |
+| `GET /api/usage` | Bucketed usage report (`granularity`/`breakdown`/`since`/`until`/`timezone`…) |
+| `GET /api/analytics` | Fleet rollups (per-model TTFT percentiles, error rates, tools, trend…) |
+| `GET /api/prompts` / `GET /api/prompt/<hash>` | Prompt registry list / full content + sessions (prefix hash ok) |
+| `GET /api/audit?mode=standard\|strict` | Egress secret findings over all indexed source logs |
+| `GET /api/events` | SSE stream; `change` events fire when the index db changes |
+| `GET /report?session=<id>` | The session's HTML wire report, or `404` if it isn't on disk |
+
+## Egress secret audit (`tracetap audit`)
+
+The wire logs are ground truth for **what actually left the machine**. And
+because coding agents resend the whole transcript on every API call, one
+credential pasted into a prompt (or read from an `.env` by a tool) doesn't
+egress once — it egresses **on every subsequent turn**. `tracetap audit` scans
+captured logs and reports exactly that:
+
+```
+$ tracetap audit
+audit: 7 file(s), 13 captured call(s), detectors: standard
+1 distinct secret(s) — 2 egress occurrence(s), 0 in responses
+
+github_token  9d3cf5da3b7f…3456  (36 chars)
+  egressed 2×  2025-12-13 04:26 → 2025-12-13 04:28
+  where: messages[0] (user)
+  file:  /…/proj/.claude-trace/leaky.jsonl
+
+Transcript resending means a secret egresses on EVERY later turn of the
+conversation — rotate any credential listed above.
+```
+
+- **Request-body hits are egress** (sent to the provider); response hits are
+  data that came back and now sits in the local log. Both are grouped by
+  sha256 fingerprint — the secret itself is **never printed** (type, length,
+  `…last4` and fingerprint prefix only).
+- Detection reuses the same high-precision detector table as `--redact-bodies`
+  (provider-prefixed keys, JWTs, `AKIA…`, `Bearer …`); `--strict` adds the
+  entropy-gated detectors. Auditing an already-redacted log reports clean.
+- `--redact-check` simulates capture-time masking and reports coverage:
+  *"`--redact-bodies` would mask 2 of 2 detected occurrence(s)"*.
+- Exits `1` when any egress finding exists — drop it in CI or a pre-share hook.
+
+| Option | Effect |
+| --- | --- |
+| `[paths…]` | `.jsonl` files or directories to walk (default: cwd's trace dirs) |
+| `--strict` | Add entropy-gated detectors (higher recall, some FP risk) |
+| `--redact-check` | Report what capture-time redaction would have masked |
+| `--json` | Full structured report |
 
 ### Interactive command center (`tracetap explore`)
 

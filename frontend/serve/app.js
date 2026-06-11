@@ -62,6 +62,41 @@
     };
   }
 
+  /** Skeleton shimmer placeholder: optional card grid + stacked rows. */
+  function skeleton(opts) {
+    opts = opts || {};
+    var h = "";
+    if (opts.cards) {
+      h += '<div class="skel-cards">';
+      for (var c = 0; c < opts.cards; c++) h += '<div class="skel skel-card"></div>';
+      h += "</div>";
+    }
+    for (var i = 0; i < (opts.rows || 6); i++) h += '<div class="skel skel-row"></div>';
+    return h;
+  }
+  function skelRows(n, cols) {
+    var out = "";
+    for (var i = 0; i < n; i++) {
+      out += '<tr><td colspan="' + cols + '"><div class="skel skel-line"></div></td></tr>';
+    }
+    return out;
+  }
+
+  // Status bar: db path, index counts, price source (refreshed on SSE change).
+  function loadMeta() {
+    fetchJSON("/api/meta").then(function (m) {
+      var db = document.getElementById("sb-db");
+      var counts = document.getElementById("sb-counts");
+      var prices = document.getElementById("sb-prices");
+      if (db) { db.textContent = m.dbPath; db.title = m.dbPath; }
+      if (counts) {
+        counts.textContent = m.counts.sessions + " sessions · " + m.counts.requests +
+          " calls · " + m.counts.prompts + " prompts · " + m.counts.events + " events";
+      }
+      if (prices) prices.textContent = "prices: " + m.priceSource;
+    }).catch(function () {});
+  }
+
   // ------------------------------------------------------------- svg charts
   /** Vertical column chart. items: [{label, value, title?, warn?}] */
   function columnChart(items, opts) {
@@ -172,7 +207,7 @@
       '<label class="check"><input id="f-errored" type="checkbox"' + (sess.errored ? " checked" : "") + "/> errored only</label>" +
       "</div>" +
       '<div class="meta-line" id="meta">Loading…</div>' +
-      '<div class="tbl-wrap"><table><thead><tr id="head"></tr></thead><tbody id="rows"></tbody></table></div>' +
+      '<div class="tbl-wrap"><table><thead><tr id="head"></tr></thead><tbody id="rows">' + skelRows(8, SESSION_COLS.length) + '</tbody></table></div>' +
       '<div class="empty" id="empty" style="display:none"></div>';
     setView(controls);
 
@@ -310,7 +345,7 @@
   // -------------------------------------------------------- session detail
   function renderSession(id) {
     current = { name: "session", arg: id };
-    setView('<div class="meta-line">Loading session…</div>');
+    setView(skeleton({ cards: 8, rows: 6 }));
     fetchJSON("/api/session/" + encodeURIComponent(id)).then(function (data) {
       if (current.name !== "session" || current.arg !== id) return;
       drawSession(data);
@@ -430,7 +465,7 @@
 
   function stepCard(st) {
     var roleClass = st.role === "user" ? "user" : st.role === "agent" ? "agent" : "system";
-    var head = '<div class="step-head"><span class="pill">#' + st.stepIndex + "</span><span>" + esc(st.role) + "</span>" +
+    var head = '<div class="step-head"><span class="pill">#' + st.stepIndex + '</span><span class="role">' + esc(st.role) + "</span>" +
       (st.errored ? '<span class="pill err">errored</span>' : "") +
       (st.toolName ? '<span class="hash">' + esc(st.toolName) + "</span>" : "") +
       "</div>";
@@ -472,7 +507,7 @@
       '<input id="u-agent" class="filter" type="text" placeholder="agent" value="' + esc(usage.agent) + '"/>' +
       "</div>" +
       '<div id="u-chart"></div>' +
-      '<div class="tbl-wrap"><table><thead><tr id="u-head"></tr></thead><tbody id="u-rows"></tbody></table></div>' +
+      '<div class="tbl-wrap"><table><thead><tr id="u-head"></tr></thead><tbody id="u-rows">' + skelRows(6, 8) + '</tbody></table></div>' +
       '<div class="note" id="u-note"></div>' +
       '<div class="empty" id="u-empty" style="display:none"></div>';
     setView(html);
@@ -566,7 +601,7 @@
   // ------------------------------------------------------------- analytics
   function renderAnalytics() {
     current = { name: "analytics" };
-    setView('<div class="meta-line">Loading analytics…</div>');
+    setView(skeleton({ cards: 7, rows: 8 }));
     fetchJSON("/api/analytics").then(function (a) {
       if (current.name !== "analytics") return;
       drawAnalytics(a);
@@ -653,7 +688,7 @@
   // --------------------------------------------------------------- prompts
   function renderPrompts() {
     current = { name: "prompts" };
-    setView('<div class="meta-line">Loading prompt registry…</div>');
+    setView(skeleton({ rows: 8 }));
     fetchJSON("/api/prompts").then(function (data) {
       if (current.name !== "prompts") return;
       if (!data.prompts.length) {
@@ -807,7 +842,7 @@
   function loadAudit() {
     var body = document.getElementById("a-body");
     if (!body) return;
-    body.innerHTML = '<div class="meta-line">Scanning indexed logs…</div>';
+    body.innerHTML = skeleton({ cards: 5, rows: 3 });
     fetchJSON("/api/audit?mode=" + audit.mode).then(function (r) {
       if (current.name !== "audit") return;
       drawAudit(r);
@@ -872,6 +907,7 @@
     });
     es.addEventListener("change", function () {
       liveLabel.textContent = "updated " + new Date().toLocaleTimeString();
+      loadMeta();
       refresh();
     });
     es.onerror = function () {
@@ -881,5 +917,6 @@
   }
 
   connectSSE();
+  loadMeta();
   route();
 })();

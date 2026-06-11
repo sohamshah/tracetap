@@ -81,7 +81,8 @@ test("GET / returns a self-contained HTML page", async () => {
   assert.match(r.contentType, /text\/html/);
   assert.match(r.text, /<!doctype html>/i);
   assert.match(r.text, /tracetap/);
-  // self-contained: inline styles + script, no external <link>/<script src>.
+  // Self-contained where it matters: inline styles + scripts. (Font <link>s
+  // are progressive enhancement with ui-monospace fallbacks — page works offline.)
   assert.match(r.text, /<style>/);
   assert.match(r.text, /\/api\/sessions/);
   assert.ok(!/<script[^>]+src=/.test(r.text), "page must not load external scripts");

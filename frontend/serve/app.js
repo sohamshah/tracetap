@@ -812,11 +812,30 @@
       card("Compactions", a.compactions.totalCompactions + ' <small>in ' + a.compactions.sessionsWithCompaction + " sessions</small>", a.compactions.totalCompactions > 0);
 
     var trendHtml = "";
-    if (a.trend.length > 1) {
-      trendHtml = '<div class="chart-box"><div class="chart-title">Daily cost (' + a.trend.length + " active days)</div>" +
-        columnChart(a.trend.map(function (d) {
-          return { label: d.date.slice(5), value: d.costUsd, title: d.date + ": " + fmtCost(d.costUsd) + " (" + d.events + " turns)" };
-        }), { height: 110, labels: true, colWidth: 26 }) + "</div>";
+    if (a.trend.length) {
+      trendHtml = '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.1</span>Cost calendar — last 26 weeks · ' +
+        a.trend.length + " active days</div>" +
+        '<div id="hm">' + TracetapCharts.calendarHeatmap(a.trend) + "</div></div>";
+    }
+
+    var tmItems = a.perProject
+      .filter(function (p) { return p.costUsd > 0; })
+      .map(function (p, i) {
+        return { label: basename(p.project) || p.project, sub: fmtCost(p.costUsd) + " · " + p.sessions + " sessions", value: p.costUsd, idx: i };
+      });
+    var vizSplit = "";
+    var strips = TracetapCharts.ttftStrips(a.perModel);
+    if (tmItems.length || strips) {
+      vizSplit = '<div class="split">' +
+        (tmItems.length
+          ? '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.2</span>Spend by project</div><div id="tm">' +
+            TracetapCharts.treemap(tmItems, { width: 620, height: 200 }) + "</div></div>"
+          : "") +
+        (strips
+          ? '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.3</span>TTFT distribution by model · box p25–p75 · tick p50 · amber p95</div><div id="ts">' +
+            strips + "</div></div>"
+          : "") +
+        "</div>";
     }
 
     var modelRows = a.perModel.map(function (m) {
@@ -855,6 +874,7 @@
     setView(
       '<div class="cards">' + cards + "</div>" +
       trendHtml +
+      vizSplit +
       '<div class="split">' +
       '<div><h2 class="sec">Per model <small>(wire latency &amp; reliability)</small></h2>' +
       '<div class="tbl-wrap"><table><thead><tr><th>Model</th><th class="num">Calls</th><th class="num">Err</th><th class="num">TTFT p50</th><th class="num">TTFT p95</th><th class="num">Dur p50</th><th class="num">Out</th></tr></thead><tbody>' +
@@ -875,6 +895,39 @@
         location.hash = "#session/" + encodeURIComponent(tr.getAttribute("data-id"));
       });
     });
+
+    var hm = document.getElementById("hm");
+    if (hm) {
+      TT.bind(hm, ".hm-cell", function (cell) {
+        var c = Number(cell.getAttribute("data-c"));
+        return TT.title(cell.getAttribute("data-d")) +
+          TT.row("cost", fmtCost(c)) +
+          TT.row("agent turns", cell.getAttribute("data-e"));
+      });
+    }
+    var tm = document.getElementById("tm");
+    if (tm) {
+      TT.bind(tm, ".tm-cell", function (cell) {
+        var p = a.perProject[Number(cell.getAttribute("data-i"))];
+        if (!p) return null;
+        return TT.title(p.project) +
+          TT.row("cost", fmtCost(p.costUsd)) +
+          TT.row("sessions", p.sessions) +
+          TT.row("agent turns", p.events) +
+          TT.row("output", fmtTok(p.completionTokens));
+      });
+    }
+    var ts = document.getElementById("ts");
+    if (ts) {
+      TT.bind(ts, ".ts-row", function (row) {
+        var m = a.perModel[Number(row.getAttribute("data-i"))];
+        if (!m || !m.ttftPcts) return null;
+        var names = ["p10", "p25", "p50", "p75", "p90", "p95"];
+        var h = TT.title(m.model + " · ttft, n=" + m.ttftN);
+        m.ttftPcts.forEach(function (v, i) { h += TT.row(names[i], fmtDur(v)); });
+        return h;
+      });
+    }
   }
 
   // --------------------------------------------------------------- prompts

@@ -247,6 +247,17 @@ h2.sec small { color: var(--dim); text-transform: none; letter-spacing: 0.04em; 
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 8px; }
 .legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: -0.5px; }
 
+/* chart text + interactive cells (calendar / treemap / strips) */
+.hm-month, .hm-day, .ts-axis { font-family: var(--font-chrome); font-size: 8px; fill: var(--dim); letter-spacing: 0.08em; }
+.hm-cell { cursor: default; }
+.hm-cell:hover { stroke: var(--bright); stroke-width: 1; }
+.tm-label { font-family: var(--font-data); font-size: 12px; font-weight: 400; fill: var(--bright); }
+.tm-sub { font-family: var(--font-data); font-size: 10px; fill: var(--dim); }
+.tm-cell:hover rect { fill-opacity: 0.3; }
+.ts-label { font-family: var(--font-data); font-size: 11px; fill: var(--mid); }
+.ts-val { font-family: var(--font-data); font-size: 10.5px; fill: var(--dim); }
+.ts-row:hover .ts-label { fill: var(--bright); }
+
 /* shared chart tooltip (positioned by charts.js) */
 .tt {
   position: fixed; z-index: 50; pointer-events: none;

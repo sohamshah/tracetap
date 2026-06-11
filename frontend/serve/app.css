@@ -312,6 +312,48 @@ h2.sec small { color: var(--dim); text-transform: none; letter-spacing: 0.04em; 
   max-height: 360px; overflow-y: auto;
 }
 
+/* -- transcript content (markdown / json / tool calls) -------------------- */
+.md-code {
+  margin: 6px 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 5px; font-size: 11.5px; overflow-x: auto;
+  white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto;
+}
+.md-ic { background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 11.5px; color: var(--mid); }
+.md-h { display: inline-block; margin-top: 6px; color: var(--bright); font-weight: 500; }
+.j-key { color: var(--accent); }
+.j-str { color: var(--green); }
+.j-num { color: var(--amber); }
+.j-lit { color: var(--accent2); }
+
+.tool-call { margin-top: 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2); }
+.tool-call summary.tc-head {
+  display: flex; align-items: center; gap: 8px; padding: 5px 9px;
+  cursor: pointer; user-select: none; list-style: none; font-size: 11px; color: var(--dim);
+}
+.tool-call summary.tc-head::-webkit-details-marker { display: none; }
+.tool-call summary.tc-head::before { content: "▸"; color: var(--muted); font-size: 9px; }
+.tool-call[open] summary.tc-head::before { content: "▾"; }
+.tc-sum { color: var(--mid); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-call .md-code, .tool-call .tc-diff { margin: 0 8px 8px; }
+.tc-cmd { color: var(--teal); }
+.tc-diff { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 6px 4px; max-height: 320px; overflow-y: auto; }
+
+/* -- transcript minimap rail ---------------------------------------------- */
+.minimap {
+  position: fixed; right: 8px; top: 116px; bottom: 64px; width: 14px;
+  display: flex; flex-direction: column; gap: 2px; z-index: 9;
+}
+.mm-tick {
+  flex: 1 1 auto; min-height: 3px; max-height: 26px; border-radius: 2px;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.mm-tick.u { background: rgba(127, 143, 255, 0.35); }
+.mm-tick.a { background: rgba(74, 222, 128, 0.28); }
+.mm-tick.e { background: rgba(248, 113, 113, 0.5); }
+.mm-tick:hover { border-color: var(--mid); }
+.mm-tick.on { border-color: var(--accent); box-shadow: 0 0 5px rgba(127, 143, 255, 0.6); }
+@media (max-width: 1180px) { .minimap { display: none; } }
+
 /* -- prompt registry ------------------------------------------------------ */
 .prompt-content {
   background: var(--surface); border: 1px solid var(--border); border-radius: 6px;

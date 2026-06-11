@@ -157,7 +157,7 @@
   function route() {
     var h = location.hash.replace(/^#/, "") || "sessions";
     var m;
-    if ((m = h.match(/^session\/(.+)$/))) renderSession(decodeURIComponent(m[1]));
+    if ((m = h.match(/^session\/([^/]+)(?:\/step-(\d+))?$/))) renderSession(decodeURIComponent(m[1]), m[2] ? Number(m[2]) : null);
     else if ((m = h.match(/^prompt\/(.+)$/))) renderPrompt(decodeURIComponent(m[1]));
     else if (h === "usage") renderUsage();
     else if (h === "analytics") renderAnalytics();
@@ -325,7 +325,7 @@
       empty.style.display = "none";
       rows.innerHTML = data.hits.map(function (h) {
         var snip = esc(h.snippet).replace(/\[([^\]]*)\]/g, "<b>$1</b>");
-        return '<tr class="click" data-id="' + esc(h.sessionId) + '">' +
+        return '<tr class="click" data-id="' + esc(h.sessionId) + '" data-step="' + h.stepIndex + '">' +
           "<td>" + agentPill(h.agent) + ' <span class="pill">#' + h.stepIndex + "</span>" +
           (h.errored ? ' <span class="pill err">errored</span>' : "") + "</td>" +
           "<td>" + esc(h.model) + "</td>" +
@@ -336,23 +336,39 @@
       }).join("");
       rows.querySelectorAll("tr[data-id]").forEach(function (tr) {
         tr.addEventListener("click", function () {
-          location.hash = "#session/" + encodeURIComponent(tr.getAttribute("data-id"));
+          // Deep-link straight to the matching transcript step.
+          location.hash = "#session/" + encodeURIComponent(tr.getAttribute("data-id")) +
+            "/step-" + tr.getAttribute("data-step");
         });
       });
     }).catch(fail);
   }
 
   // -------------------------------------------------------- session detail
-  function renderSession(id) {
+  function renderSession(id, stepN) {
+    if (current.name === "session" && current.arg === id && stepN != null) {
+      // Same session, new step anchor (e.g. minimap click) — just scroll.
+      flashStep(stepN);
+      return;
+    }
     current = { name: "session", arg: id };
     setView(skeleton({ cards: 8, rows: 6 }));
     fetchJSON("/api/session/" + encodeURIComponent(id)).then(function (data) {
       if (current.name !== "session" || current.arg !== id) return;
-      drawSession(data);
+      drawSession(data, stepN);
     }).catch(fail);
   }
 
-  function drawSession(data) {
+  function flashStep(stepIndex) {
+    var elStep = document.getElementById("step-" + stepIndex);
+    if (!elStep) return;
+    elStep.scrollIntoView({ behavior: "smooth", block: "center" });
+    elStep.classList.remove("flash");
+    void elStep.offsetWidth; // restart the animation
+    elStep.classList.add("flash");
+  }
+
+  function drawSession(data, stepN) {
     var s = data.session, reqs = data.requests, steps = data.steps;
     var compactSeqs = {};
     data.compactions.forEach(function (c) { compactSeqs[c.seq] = c; });
@@ -380,11 +396,90 @@
       "</span></div>" +
       '<div class="cards">' + cards + "</div>" +
       laneSection(reqs, compactSeqs) +
-      '<h2 class="sec">Request waterfall <small>(' + reqs.length + " API calls — grey = waiting for first byte, blue = streaming)</small></h2>" +
-      '<div class="chart-box waterfall">' + waterfall(reqs, compactSeqs) + "</div>" +
+      '<h2 class="sec">Request waterfall <small>(' + reqs.length + " API calls · hover for wire metrics · click to jump to the step)</small></h2>" +
+      '<div class="chart-box waterfall" id="wf">' + waterfall(reqs, compactSeqs) + "</div>" +
       '<h2 class="sec">Transcript <small>(' + steps.length + " steps)</small></h2>" +
-      '<div class="steps">' + steps.map(stepCard).join("") + "</div>";
+      '<div class="steps">' + steps.map(stepCard).join("") + "</div>" +
+      minimapHtml(steps);
     setView(html);
+    bindSessionInteractions(reqs, compactSeqs, steps);
+    if (stepN != null) setTimeout(function () { flashStep(stepN); }, 30);
+  }
+
+  function bindSessionInteractions(reqs, compactSeqs, steps) {
+    var wf = document.getElementById("wf");
+    if (wf) {
+      var bySeq = {};
+      reqs.forEach(function (r) { bySeq[r.seq] = r; });
+      TT.bind(wf, ".wf-row", function (rowEl) {
+        var r = bySeq[rowEl.getAttribute("data-seq")];
+        return r ? wfTooltip(r, compactSeqs[r.seq]) : null;
+      });
+      wf.addEventListener("click", function (e) {
+        var rowEl = e.target.closest(".wf-row");
+        if (!rowEl) return;
+        var step = rowEl.getAttribute("data-step");
+        if (step) flashStep(step);
+      });
+    }
+
+    var mm = document.getElementById("minimap");
+    if (mm) {
+      mm.addEventListener("click", function (e) {
+        var tick = e.target.closest(".mm-tick");
+        if (!tick) return;
+        e.preventDefault();
+        flashStep(tick.getAttribute("data-step"));
+      });
+      // Scroll spy: light up the rail segment for the topmost visible step.
+      var visible = new Set();
+      var spy = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          var idx = en.target.id.replace("step-", "");
+          if (en.isIntersecting) visible.add(idx);
+          else visible.delete(idx);
+        });
+        var top = null;
+        visible.forEach(function (idx) {
+          var n = Number(idx);
+          if (top == null || n < top) top = n;
+        });
+        mm.querySelectorAll(".mm-tick").forEach(function (t) {
+          t.classList.toggle("on", Number(t.getAttribute("data-step")) === top);
+        });
+      }, { rootMargin: "-64px 0px -40% 0px" });
+      document.querySelectorAll(".step[id^=step-]").forEach(function (st) { spy.observe(st); });
+    }
+  }
+
+  function wfTooltip(r, compaction) {
+    var stream = r.durationMs != null && r.ttftMs != null ? r.durationMs - r.ttftMs : null;
+    var h = TT.title("call " + r.seq + (r.model ? " · " + r.model : ""));
+    h += TT.row("status", r.status == null ? '<span class="warn-text">no response</span>' : r.status >= 400 ? '<span class="warn-text">' + r.status + "</span>" : String(r.status));
+    if (r.ttftMs != null) h += TT.row("ttft", fmtDur(r.ttftMs));
+    if (stream != null) h += TT.row("stream", fmtDur(stream));
+    h += TT.row("total", fmtDur(r.durationMs));
+    h += TT.row("fresh in", fmtTok(r.promptTokens));
+    h += TT.row("cache read", fmtTok(r.cacheRead));
+    if (r.cacheCreation) h += TT.row("cache write", fmtTok(r.cacheCreation));
+    h += TT.row("output", fmtTok(r.completionTokens));
+    if (r.reasoningTokens) h += TT.row("reasoning", fmtTok(r.reasoningTokens));
+    if (r.stopReason) h += TT.row("stop", TT.esc(r.stopReason));
+    h += TT.row("transcript", r.transcriptItems + " items");
+    if (compaction) h += TT.row("compaction", '<span class="warn-text">' + compaction.from + " → " + compaction.to + " items</span>");
+    if (r.promptHash) h += TT.row("prompt", r.promptHash.slice(0, 8));
+    if (r.agentStepIndex != null) h += TT.row("step", "#" + r.agentStepIndex + " · click to jump");
+    return h;
+  }
+
+  function minimapHtml(steps) {
+    if (steps.length < 8) return "";
+    return '<nav class="minimap" id="minimap" aria-label="transcript minimap">' +
+      steps.map(function (st) {
+        var cls = st.errored ? "e" : st.role === "user" ? "u" : st.role === "agent" ? "a" : "s";
+        var label = "#" + st.stepIndex + " " + st.role + (st.toolName ? " · " + st.toolName.split(/\s+/)[0] : "");
+        return '<a class="mm-tick ' + cls + '" href="#" data-step="' + st.stepIndex + '" title="' + esc(label) + '"></a>';
+      }).join("") + "</nav>";
   }
 
   function card(k, v, alert) {
@@ -416,9 +511,9 @@
       };
     });
     return '<div class="split">' +
-      '<div class="chart-box"><div class="chart-title">Context growth — transcript items per call (amber = mid-task compaction)</div>' +
+      '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.1</span>Context growth — transcript items per call · amber = mid-task compaction</div>' +
       columnChart(ctxItems, { height: 110, labels: false }) + "</div>" +
-      '<div class="chart-box"><div class="chart-title">Token flow per call</div>' +
+      '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.2</span>Token flow per call</div>' +
       stackedChart(tokItems, { height: 110 }) +
       '<div class="legend">' +
       '<span><span class="sw" style="background:var(--cache)"></span>cache read</span>' +
@@ -455,8 +550,10 @@
         (r.ttftMs != null ? " · ttft " + fmtDur(r.ttftMs) : "") +
         " · " + fmtTok(r.completionTokens) + " out" +
         (r.stopReason ? " · " + esc(r.stopReason) : "");
-      return '<div class="wf-row">' +
-        '<div class="wf-label">' + r.seq + (c ? ' <span class="wf-compact" title="transcript compacted: ' + c.from + " → " + c.to + '">⇣</span>' : "") + "</div>" +
+      var linked = r.agentStepIndex != null;
+      return '<div class="wf-row' + (linked ? " click" : "") + '" data-seq="' + r.seq + '"' +
+        (linked ? ' data-step="' + r.agentStepIndex + '"' : "") + ">" +
+        '<div class="wf-label">' + r.seq + (c ? ' <span class="wf-compact">⇣</span>' : "") + "</div>" +
         '<div class="wf-track">' + bars + "</div>" +
         '<div class="wf-meta">' + meta + "</div>" +
         "</div>";
@@ -467,21 +564,116 @@
     var roleClass = st.role === "user" ? "user" : st.role === "agent" ? "agent" : "system";
     var head = '<div class="step-head"><span class="pill">#' + st.stepIndex + '</span><span class="role">' + esc(st.role) + "</span>" +
       (st.errored ? '<span class="pill err">errored</span>' : "") +
-      (st.toolName ? '<span class="hash">' + esc(st.toolName) + "</span>" : "") +
       "</div>";
     var body = "";
     if (st.reasoning) {
       body += '<details><summary>reasoning (' + fmtTok(st.reasoning.length) + " chars)</summary><pre>" + esc(clip(st.reasoning, 20000)) + "</pre></details>";
     }
-    if (st.message) body += '<div class="step-body">' + esc(clip(st.message, 6000)) + "</div>";
-    if (st.toolInput) {
-      body += '<details><summary>tool input</summary><pre>' + esc(clip(st.toolInput, 20000)) + "</pre></details>";
-    }
+    if (st.message) body += '<div class="step-body">' + renderMarkdown(st.message) + "</div>";
+    body += toolCallsHtml(st);
     if (st.observation) {
-      body += '<details><summary>observation (' + fmtTok(st.observation.length) + " chars)</summary><pre>" + esc(clip(st.observation, 20000)) + "</pre></details>";
+      var obs = clip(st.observation, 20000), obsInner;
+      try { JSON.parse(obs); obsInner = hlJSON(obs); } catch (e) { obsInner = esc(obs); }
+      body += '<details><summary>observation (' + fmtTok(st.observation.length) + " chars)</summary><pre>" + obsInner + "</pre></details>";
     }
     if (!body) body = '<div class="step-body dim">(empty step)</div>';
-    return '<div class="step ' + roleClass + (st.errored ? " errored" : "") + '">' + head + body + "</div>";
+    return '<div class="step ' + roleClass + (st.errored ? " errored" : "") + '" id="step-' + st.stepIndex + '">' + head + body + "</div>";
+  }
+
+  // -- transcript renderers --------------------------------------------------
+
+  /** Markdown subset, escape-first (XSS-safe): fences, inline code, bold,
+      headings, bullets, http(s) links. Everything else stays pre-wrapped. */
+  function renderMarkdown(raw) {
+    var s = esc(clip(raw, 12000));
+    var parts = s.split("```");
+    var out = "";
+    for (var i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        out += '<pre class="md-code">' + parts[i].replace(/^[\w+-]*\n/, "") + "</pre>";
+      } else {
+        out += mdInline(parts[i]);
+      }
+    }
+    return out;
+  }
+  function mdInline(s) {
+    return s
+      .replace(/`([^`\n]+)`/g, '<code class="md-ic">$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|\n)#{1,4}\s+([^\n]+)/g, '$1<span class="md-h">$2</span>')
+      .replace(/(^|\n)\s*[-*]\s+/g, "$1• ")
+      .replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  }
+
+  /** Pretty-print + token-color JSON. Falls back to escaped text on parse failure. */
+  function hlJSON(val) {
+    var s;
+    try {
+      s = typeof val === "string" ? JSON.stringify(JSON.parse(val), null, 2) : JSON.stringify(val, null, 2);
+    } catch (e) { return esc(String(val)); }
+    if (s == null) return "";
+    if (s.length > 24000) return esc(clip(s, 24000));
+    var re = /("(?:[^"\\]|\\.)*")(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+    var out = "", last = 0, m;
+    while ((m = re.exec(s))) {
+      out += esc(s.slice(last, m.index));
+      if (m[1] !== undefined) {
+        out += '<span class="' + (m[2] ? "j-key" : "j-str") + '">' + esc(m[1]) + "</span>" + (m[2] || "");
+      } else if (m[0] === "true" || m[0] === "false" || m[0] === "null") {
+        out += '<span class="j-lit">' + m[0] + "</span>";
+      } else {
+        out += '<span class="j-num">' + m[0] + "</span>";
+      }
+      last = m.index + m[0].length;
+    }
+    return out + esc(s.slice(last));
+  }
+
+  /** One block per tool call: name chip + target summary; Edit args render as
+      a real diff, shell-style args as a command line, the rest as colored JSON. */
+  function toolCallsHtml(st) {
+    if (!st.toolInput) return "";
+    var names = st.toolName ? st.toolName.split(/\s+/) : [];
+    var lines = st.toolInput.split("\n").filter(function (l) { return l.trim(); });
+    if (!lines.length) return "";
+    return lines.map(function (line, i) {
+      var name = names[i] || names[names.length - 1] || "tool";
+      var args = null;
+      try { args = JSON.parse(line); } catch (e) {}
+      var sum = tcSummary(args);
+      var isDiff = args && typeof args.old_string === "string" && typeof args.new_string === "string";
+      var isCmd = args && typeof args.command === "string";
+      var open = isDiff || isCmd || line.length < 400;
+      return '<details class="tool-call"' + (open ? " open" : "") + '><summary class="tc-head">' +
+        '<span class="pill">' + esc(name) + "</span>" +
+        (sum ? '<span class="tc-sum">' + sum + "</span>" : "") +
+        "</summary>" + tcBody(args, line, isDiff, isCmd) + "</details>";
+    }).join("");
+  }
+  function tcSummary(args) {
+    if (!args || typeof args !== "object") return "";
+    var v = args.file_path || args.path || args.notebook_path || args.pattern || args.url ||
+      (typeof args.command === "string" ? args.command : "") ||
+      (typeof args.description === "string" ? args.description : "");
+    return v ? esc(clip(String(v), 96)) : "";
+  }
+  function tcBody(args, rawLine, isDiff, isCmd) {
+    if (isDiff) {
+      var extra = {};
+      Object.keys(args).forEach(function (k) {
+        if (k !== "old_string" && k !== "new_string") extra[k] = args[k];
+      });
+      var head = Object.keys(extra).length ? '<pre class="md-code">' + hlJSON(extra) + "</pre>" : "";
+      return head + '<div class="tc-diff diff">' + diffHtml(args.old_string, args.new_string) + "</div>";
+    }
+    if (isCmd) {
+      var rest = {};
+      Object.keys(args).forEach(function (k) { if (k !== "command") rest[k] = args[k]; });
+      return '<pre class="md-code tc-cmd">$ ' + esc(clip(args.command, 4000)) + "</pre>" +
+        (Object.keys(rest).length ? '<pre class="md-code">' + hlJSON(rest) + "</pre>" : "");
+    }
+    return '<pre class="md-code">' + (args != null ? hlJSON(args) : esc(clip(rawLine, 20000))) + "</pre>";
   }
 
   function clip(s, n) {

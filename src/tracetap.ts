@@ -60,6 +60,9 @@ ${colors.yellow}COMMANDS:${colors.reset}
                               store (SQLite + FTS5; default: cwd + ~)
   search "<query>"            Full-text search across every indexed session
                               (--tool/--model/--agent/--errored/--json, …)
+  usage [daily|weekly|monthly|total]
+                              Token & spend report from wire-exact usage
+                              (--breakdown/--since/--json/--statusline, …)
   explore                     Interactive cross-session command center (Ink TUI):
                               search · filter · live-tail · diff · ATIF export
   serve [--port <n>]          Launch a local dashboard (browser UI) over every
@@ -106,6 +109,11 @@ async function main(): Promise<void> {
   if (argv[0] === "search") {
     const { runSearch } = await import("./store/cli");
     await runSearch(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "usage") {
+    const { runUsage } = await import("./usage");
+    await runUsage(argv.slice(1));
     return;
   }
 

@@ -193,6 +193,34 @@ export interface RequestRow {
   promptHash: string;
 }
 
+export interface UsageEventFilters {
+  /** Inclusive unix-epoch-second bounds on the event timestamp. */
+  since?: number;
+  until?: number;
+  /** Exact (case-insensitive) agent name. */
+  agent?: string;
+  /** Substring (case-insensitive) the model id must contain. */
+  model?: string;
+  /** Substring (case-insensitive) the session project cwd must contain. */
+  project?: string;
+}
+
+/** One agent step's token usage, joined with its session's project. */
+export interface UsageEventRow {
+  ts: number;
+  sessionId: string;
+  agent: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  reasoningTokens: number;
+  /** Cost computed at index time, null when the model was unpriced. */
+  costUsd: number | null;
+  projectCwd: string;
+}
+
 /** A distinct system-prompt version seen on the wire (content-addressed). */
 export interface PromptSummary {
   promptHash: string;
@@ -1041,6 +1069,68 @@ export class Store {
   getSession(sessionId: string): SessionSummary | null {
     const rows = this.listSessions();
     return rows.find((s) => s.sessionId === sessionId) ?? null;
+  }
+
+  // -- usage events ----------------------------------------------------------
+
+  /**
+   * Time-stamped per-step usage events (newest last), optionally filtered.
+   * Powers `tracetap usage`; cost re-pricing happens in the caller so the
+   * freshest price table wins over whatever was current at index time.
+   */
+  listUsageEvents(filters: UsageEventFilters = {}): UsageEventRow[] {
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (typeof filters.since === "number") {
+      where.push("u.ts >= @since");
+      params.since = filters.since;
+    }
+    if (typeof filters.until === "number") {
+      where.push("u.ts <= @until");
+      params.until = filters.until;
+    }
+    if (filters.agent) {
+      where.push("lower(u.agent) = lower(@agent)");
+      params.agent = filters.agent;
+    }
+    if (filters.model) {
+      where.push("lower(u.model) LIKE '%' || lower(@model) || '%'");
+      params.model = filters.model;
+    }
+    if (filters.project) {
+      where.push("lower(s.project_cwd) LIKE '%' || lower(@project) || '%'");
+      params.project = filters.project;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT
+           u.ts AS ts, u.session_id AS sessionId, u.agent AS agent, u.model AS model,
+           u.prompt_tokens AS promptTokens, u.completion_tokens AS completionTokens,
+           u.cache_read AS cacheRead, u.cache_creation AS cacheCreation,
+           u.reasoning_tokens AS reasoningTokens, u.cost_usd AS costUsd,
+           s.project_cwd AS projectCwd
+         FROM usage_events u
+         LEFT JOIN sessions s ON s.session_id = u.session_id
+         ${whereSql}
+         ORDER BY u.ts`,
+      )
+      .all(params) as any[];
+    return rows.map(
+      (r): UsageEventRow => ({
+        ts: Number(r.ts ?? 0),
+        sessionId: String(r.sessionId),
+        agent: String(r.agent ?? ""),
+        model: String(r.model ?? ""),
+        promptTokens: Number(r.promptTokens ?? 0),
+        completionTokens: Number(r.completionTokens ?? 0),
+        cacheRead: Number(r.cacheRead ?? 0),
+        cacheCreation: Number(r.cacheCreation ?? 0),
+        reasoningTokens: Number(r.reasoningTokens ?? 0),
+        costUsd: r.costUsd == null ? null : Number(r.costUsd),
+        projectCwd: String(r.projectCwd ?? ""),
+      }),
+    );
   }
 
   // -- wire metrics ----------------------------------------------------------

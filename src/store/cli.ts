@@ -49,6 +49,7 @@ ARGUMENTS:
 OPTIONS:
   --db <path>       Index database path (default: ~/.tracetap/index.db)
   --json            Emit the index summary as JSON
+  --offline         Skip the live price-table fetch (cache/builtin prices)
   --help, -h        Show this help
 `;
 
@@ -62,10 +63,12 @@ export async function runIndex(argv: string[]): Promise<void> {
   const roots: string[] = [];
   let dbPath = defaultDbPath();
   let json = false;
+  let offline = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--json") json = true;
+    else if (arg === "--offline") offline = true;
     else if (arg === "--db") {
       const next = argv[++i];
       if (!next) throw new Error("--db requires a path");
@@ -77,7 +80,12 @@ export async function runIndex(argv: string[]): Promise<void> {
     }
   }
 
-  const store = new Store(dbPath);
+  // Index-time costs (sessions.cost_usd, usage_events.cost_usd) use the
+  // freshest price table available; `tracetap usage` re-prices at read time
+  // anyway, so a failed fetch here only affects the stored estimates.
+  const { loadPrices } = await import("../pricing");
+  const { prices } = await loadPrices({ offline });
+  const store = new Store(dbPath, { prices });
   try {
     const result = store.indexPaths(roots);
     if (json) {

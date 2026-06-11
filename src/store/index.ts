@@ -193,6 +193,21 @@ export interface RequestRow {
   promptHash: string;
 }
 
+/** One indexed step's text content (the transcript row the FTS index holds). */
+export interface StepText {
+  stepIndex: number;
+  role: string;
+  message: string;
+  reasoning: string;
+  /** Space-joined tool names this step called. */
+  toolName: string;
+  /** Newline-joined JSON args (one line per call). */
+  toolInput: string;
+  /** Newline-joined stitched tool results. */
+  observation: string;
+  errored: boolean;
+}
+
 export interface UsageEventFilters {
   /** Inclusive unix-epoch-second bounds on the event timestamp. */
   since?: number;
@@ -1069,6 +1084,36 @@ export class Store {
   getSession(sessionId: string): SessionSummary | null {
     const rows = this.listSessions();
     return rows.find((s) => s.sessionId === sessionId) ?? null;
+  }
+
+  // -- transcript ------------------------------------------------------------
+
+  /**
+   * The indexed transcript of one session, in step order. Text comes from the
+   * FTS rows (same content `search` matches against), so the dashboard's
+   * transcript is exactly what is searchable.
+   */
+  listSteps(sessionId: string): StepText[] {
+    const rows = this.db
+      .prepare(
+        `SELECT step_index AS stepIndex, role, message, reasoning,
+                tool_name AS toolName, tool_input AS toolInput,
+                observation, error_flag AS errorFlag
+         FROM steps_fts WHERE session_id = ? ORDER BY rowid`,
+      )
+      .all(sessionId) as any[];
+    return rows.map(
+      (r): StepText => ({
+        stepIndex: Number(r.stepIndex),
+        role: String(r.role ?? ""),
+        message: String(r.message ?? ""),
+        reasoning: String(r.reasoning ?? ""),
+        toolName: String(r.toolName ?? ""),
+        toolInput: String(r.toolInput ?? ""),
+        observation: String(r.observation ?? ""),
+        errored: r.errorFlag === "1",
+      }),
+    );
   }
 
   // -- usage events ----------------------------------------------------------

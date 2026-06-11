@@ -19,6 +19,7 @@
     "frontend/template.html",
     "frontend/codex-template.html",
     "frontend/gemini-template.html",
+    "frontend/serve/**/*",
     "frontend/patches/**/*",
     "README.md",
     "LICENSE"

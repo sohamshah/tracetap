@@ -1082,6 +1082,226 @@
     body.innerHTML = html;
   }
 
+  // ------------------------------------------------- keyboard + palette
+  var TABS = ["sessions", "usage", "analytics", "prompts", "audit"];
+
+  function isTyping(e) {
+    var t = e.target;
+    return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+  }
+
+  function focusedRow() { return view.querySelector(".kb-focus"); }
+
+  function moveCursor(dir) {
+    var rows = Array.prototype.slice.call(view.querySelectorAll("tr.click, .wf-row.click"));
+    if (!rows.length) return;
+    var cur = focusedRow();
+    var idx = cur ? rows.indexOf(cur) : -1;
+    var next = Math.min(rows.length - 1, Math.max(0, idx + dir));
+    if (cur) cur.classList.remove("kb-focus");
+    rows[next].classList.add("kb-focus");
+    rows[next].scrollIntoView({ block: "nearest" });
+  }
+
+  function activateCursor() {
+    var cur = focusedRow();
+    if (cur) cur.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  }
+
+  function focusSearch() {
+    var inp = view.querySelector('input[type="search"]') || view.querySelector('input[type="text"]');
+    if (inp) { inp.focus(); inp.select(); return true; }
+    return false;
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      togglePalette();
+      return;
+    }
+    if (paletteOpen() || helpOpen()) return; // overlays own their keys
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTyping(e)) {
+      if (e.key === "Escape") e.target.blur();
+      return;
+    }
+    if (e.key === "/") { e.preventDefault(); focusSearch(); }
+    else if (e.key === "j") moveCursor(1);
+    else if (e.key === "k") moveCursor(-1);
+    else if (e.key === "Enter" && focusedRow()) { e.preventDefault(); activateCursor(); }
+    else if (e.key >= "1" && e.key <= "5") location.hash = "#" + TABS[Number(e.key) - 1];
+    else if (e.key === "?") toggleHelp();
+    else if (e.key === "Escape") {
+      if (current.name === "session") location.hash = "#sessions";
+      else if (current.name === "prompt") location.hash = "#prompts";
+    }
+  });
+
+  // -- command palette ---------------------------------------------------
+  var palItems = [], palSel = 0;
+
+  function paletteOpen() { return !!document.getElementById("pal"); }
+
+  function togglePalette() {
+    if (paletteOpen()) { closeOverlays(); return; }
+    closeOverlays();
+    var ov = document.createElement("div");
+    ov.className = "pal-overlay";
+    ov.id = "pal";
+    ov.innerHTML =
+      '<div class="pal">' +
+      '<input id="pal-q" type="text" placeholder="Jump to a session, prompt, or view…" autocomplete="off" spellcheck="false" />' +
+      '<div class="pal-list" id="pal-list"><div class="pal-empty">indexing…</div></div>' +
+      '<div class="pal-foot">↑↓ navigate · ↵ open · esc close</div>' +
+      "</div>";
+    document.body.appendChild(ov);
+    ov.addEventListener("mousedown", function (e) { if (e.target === ov) closeOverlays(); });
+
+    var q = document.getElementById("pal-q");
+    q.focus();
+    q.addEventListener("input", function () { palRender(q.value); });
+    q.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { e.preventDefault(); closeOverlays(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); palMove(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); palMove(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        var sel = document.querySelector(".pal-item.sel");
+        if (sel) palGo(sel.getAttribute("data-go"));
+      }
+      e.stopPropagation();
+    });
+
+    palItems = TABS.map(function (t, i) {
+      return { kind: "view", label: t, sub: "switch view · " + (i + 1), go: "#" + t, text: t };
+    });
+    Promise.all([
+      fetchJSON("/api/sessions?limit=200").catch(function () { return { sessions: [] }; }),
+      fetchJSON("/api/prompts").catch(function () { return { prompts: [] }; })
+    ]).then(function (res) {
+      res[0].sessions.forEach(function (s) {
+        palItems.push({
+          kind: "session",
+          label: s.agent + " · " + (s.model || "?") + " · " + basename(s.projectCwd),
+          sub: fmtTime(s.startedAt) + " · " + (s.turns || 0) + " turns · " + fmtCost(s.costUsd),
+          go: "#session/" + encodeURIComponent(s.sessionId),
+          text: s.sessionId + " " + s.agent + " " + s.model + " " + s.projectCwd
+        });
+      });
+      res[1].prompts.forEach(function (p) {
+        palItems.push({
+          kind: "prompt",
+          label: p.promptHash.slice(0, 12) + " · " + p.agent,
+          sub: "~" + fmtTok(p.approxTokens) + " tokens · last seen " + fmtTime(p.lastSeen),
+          go: "#prompt/" + p.promptHash,
+          text: p.promptHash + " " + p.agent + " prompt"
+        });
+      });
+      if (paletteOpen()) palRender(q.value);
+    });
+    palRender("");
+  }
+
+  /** Subsequence fuzzy score: consecutive + word-start bonuses, -1 = no match. */
+  function fuzzyScore(needle, hay) {
+    if (!needle) return 0;
+    needle = needle.toLowerCase();
+    hay = hay.toLowerCase();
+    var score = 0, hi = 0, streak = 0;
+    for (var ni = 0; ni < needle.length; ni++) {
+      var c = needle[ni];
+      if (c === " ") { streak = 0; continue; }
+      var found = hay.indexOf(c, hi);
+      if (found === -1) return -1;
+      streak = found === hi ? streak + 1 : 1;
+      score += streak * 2 + (found === 0 || hay[found - 1] === " " || hay[found - 1] === "/" ? 4 : 0);
+      hi = found + 1;
+    }
+    return score;
+  }
+
+  function palRender(qv) {
+    var list = document.getElementById("pal-list");
+    if (!list) return;
+    var ranked = palItems
+      .map(function (it) { return { it: it, s: fuzzyScore(qv, it.text) }; })
+      .filter(function (r) { return r.s >= 0; })
+      .sort(function (a, b) { return b.s - a.s; })
+      .slice(0, 12);
+    palSel = 0;
+    if (!ranked.length) {
+      list.innerHTML = '<div class="pal-empty">no matches</div>';
+      return;
+    }
+    list.innerHTML = ranked.map(function (r, i) {
+      return '<div class="pal-item' + (i === 0 ? " sel" : "") + '" data-go="' + esc(r.it.go) + '">' +
+        '<span class="pal-kind ' + r.it.kind + '">' + r.it.kind + "</span>" +
+        '<span class="pal-label">' + esc(r.it.label) + "</span>" +
+        '<span class="pal-sub">' + esc(r.it.sub) + "</span>" +
+        "</div>";
+    }).join("");
+    list.querySelectorAll(".pal-item").forEach(function (el) {
+      el.addEventListener("click", function () { palGo(el.getAttribute("data-go")); });
+    });
+  }
+
+  function palMove(dir) {
+    var items = document.querySelectorAll(".pal-item");
+    if (!items.length) return;
+    palSel = Math.min(items.length - 1, Math.max(0, palSel + dir));
+    items.forEach(function (el, i) { el.classList.toggle("sel", i === palSel); });
+    items[palSel].scrollIntoView({ block: "nearest" });
+  }
+
+  function palGo(hash) {
+    closeOverlays();
+    if (location.hash === hash) route();
+    else location.hash = hash;
+  }
+
+  // -- shortcuts overlay ---------------------------------------------------
+  function helpOpen() { return !!document.getElementById("help"); }
+
+  function toggleHelp() {
+    if (helpOpen()) { closeOverlays(); return; }
+    closeOverlays();
+    var rows = [
+      ["⌘K", "command palette"],
+      ["/", "focus search"],
+      ["j / k", "move row cursor"],
+      ["↵", "open focused row"],
+      ["1–5", "switch view"],
+      ["esc", "back / close"],
+      ["?", "this overlay"]
+    ];
+    var ov = document.createElement("div");
+    ov.className = "pal-overlay";
+    ov.id = "help";
+    ov.innerHTML = '<div class="pal help"><div class="tt-title">keyboard</div>' +
+      rows.map(function (r) {
+        return '<div class="help-row"><kbd>' + r[0] + "</kbd><span>" + r[1] + "</span></div>";
+      }).join("") + "</div>";
+    document.body.appendChild(ov);
+    ov.addEventListener("mousedown", function (e) { if (e.target === ov) closeOverlays(); });
+    document.addEventListener("keydown", function onEsc(e) {
+      if (e.key === "Escape" || e.key === "?") {
+        closeOverlays();
+        document.removeEventListener("keydown", onEsc);
+      }
+    });
+  }
+
+  function closeOverlays() {
+    ["pal", "help"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.remove();
+    });
+  }
+
+  var palBtn = document.getElementById("palette-btn");
+  if (palBtn) palBtn.addEventListener("click", togglePalette);
+
   // -------------------------------------------------------------- SSE live
   var liveEl = document.getElementById("live");
   var liveLabel = document.getElementById("live-label");

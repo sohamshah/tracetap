@@ -113,6 +113,7 @@ export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; c
 
     let responseChunks: Buffer[] = [];
     let responseBytes = 0;
+    let firstByteAt: number | null = null;
     let upstreamRes: http.IncomingMessage | null = null;
 
     upstreamReq.on("response", (res: http.IncomingMessage) => {
@@ -127,6 +128,7 @@ export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; c
       clientRes.writeHead(res.statusCode || 502, res.statusMessage, respHeadersOut);
 
       res.on("data", (chunk: Buffer) => {
+        if (firstByteAt === null) firstByteAt = Date.now();
         responseBytes += chunk.length;
         if (responseBytes <= MAX_LOG_BODY) {
           responseChunks.push(chunk);
@@ -153,7 +155,7 @@ export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; c
         if (!clientRes.headersSent) {
           clientRes.writeHead(502, { "content-type": "text/plain" });
         }
-        clientRes.end(`claude-trace-v2 proxy upstream error: ${err.message}`);
+        clientRes.end(`tracetap proxy upstream error: ${err.message}`);
       } catch {
         // ignore
       }
@@ -210,6 +212,7 @@ export function createProxyServer(opts: ProxyOptions): Promise<{ port: number; c
         response: upstreamRes
           ? {
               timestamp: Date.now() / 1000,
+              ...(firstByteAt !== null ? { first_byte_timestamp: firstByteAt / 1000 } : {}),
               status_code: upstreamRes.statusCode || 0,
               headers: redactSensitiveHeaders(upstreamRes.headers),
               ...parseResponseBodyForLog(respBody, respContentType),

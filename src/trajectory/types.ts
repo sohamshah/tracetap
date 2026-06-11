@@ -118,6 +118,13 @@ export interface ParsedResponse {
   usage: NormalizedUsage | null;
   model?: string;
   status?: number | null;
+  /**
+   * Provider-reported termination reason for the turn, verbatim: Anthropic
+   * `stop_reason` ("end_turn" / "tool_use" / "max_tokens" …), OpenAI Responses
+   * `response.status` ("completed" / "incomplete" / "failed"), Gemini
+   * `finishReason` ("STOP" / "MAX_TOKENS" …).
+   */
+  stopReason?: string;
 }
 
 /**
@@ -137,4 +144,11 @@ export interface AgentAdapter {
   parseRequestItems(pair: RawPair): WireItem[];
   /** The assistant turn produced by this pair's response. */
   parseResponse(pair: RawPair): ParsedResponse;
+  /**
+   * The system prompt carried by this pair's request, as plain text with
+   * per-call volatile fragments (timestamps, cache-busting hashes) normalized
+   * away, so semantically identical prompts hash identically across calls.
+   * Null when the request carries no system prompt.
+   */
+  systemPromptText(pair: RawPair): string | null;
 }

@@ -68,15 +68,17 @@ export class AnthropicAdapter implements AgentAdapter {
     // Non-streamed JSON body (e.g. errors or buffered responses).
     if (resp.body && typeof resp.body === "object") {
       const b: any = resp.body;
+      const stopReason = typeof b.stop_reason === "string" ? b.stop_reason : undefined;
       if (Array.isArray(b.content)) {
         return {
           items: flattenAssistantBlocks(b.content),
           usage: normalizeUsage(b.usage),
           model: b.model,
           status,
+          stopReason,
         };
       }
-      return { items: [], usage: normalizeUsage(b.usage), status };
+      return { items: [], usage: normalizeUsage(b.usage), status, stopReason };
     }
 
     if (typeof resp.body_raw === "string" && resp.body_raw.length) {
@@ -86,10 +88,28 @@ export class AnthropicAdapter implements AgentAdapter {
         usage: assembled.usage,
         model: assembled.model,
         status,
+        stopReason: assembled.stopReason,
       };
     }
 
     return { items: [], usage: null, status };
+  }
+
+  systemPromptText(pair: RawPair): string | null {
+    const system = pair?.request?.body?.system;
+    if (system == null) return null;
+    if (typeof system === "string") {
+      const text = normalizeVolatileText(system);
+      return text.trim() ? text : null;
+    }
+    if (Array.isArray(system)) {
+      const texts = system
+        .filter((b: any) => b && typeof b === "object" && typeof b.text === "string")
+        .map((b: any) => normalizeVolatileText(b.text));
+      const joined = texts.join("\n\n");
+      return joined.trim() ? joined : null;
+    }
+    return null;
   }
 }
 
@@ -174,6 +194,7 @@ interface AssembledMessage {
   blocks: any[];
   usage: NormalizedUsage | null;
   model?: string;
+  stopReason?: string;
 }
 
 /**
@@ -184,6 +205,7 @@ function assembleSSE(raw: string): AssembledMessage {
   const events = parseSSEEvents(raw);
   const blocks: any[] = [];
   let model: string | undefined;
+  let stopReason: string | undefined;
   let inputTokens = 0;
   let cacheCreation = 0;
   let cacheRead = 0;
@@ -223,6 +245,8 @@ function assembleSSE(raw: string): AssembledMessage {
     } else if (type === "message_delta") {
       const u = (data as any).usage ?? {};
       if (u.output_tokens !== undefined) outputTokens = num(u.output_tokens);
+      const sr = (data as any).delta?.stop_reason;
+      if (typeof sr === "string") stopReason = sr;
     }
   }
 
@@ -245,7 +269,7 @@ function assembleSSE(raw: string): AssembledMessage {
     cacheCreationTokens: cacheCreation,
     cacheReadTokens: cacheRead,
   };
-  return { blocks: blocks.filter(Boolean), usage, model };
+  return { blocks: blocks.filter(Boolean), usage, model, stopReason };
 }
 
 function parseSSEEvents(raw: string): { ev: string | null; data: any }[] {

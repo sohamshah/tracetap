@@ -70,12 +70,14 @@ export class OpenAIAdapter implements AgentAdapter {
     let output: any[] = [];
     let usageRaw: any = null;
     let model: string | undefined;
+    let stopReason: string | undefined;
 
     if (resp.body && typeof resp.body === "object") {
       const b: any = resp.body;
       if (Array.isArray(b.output)) output = b.output;
       usageRaw = b.usage ?? null;
       model = b.model;
+      if (typeof b.status === "string") stopReason = b.status;
     } else if (typeof resp.body_raw === "string" && resp.body_raw.length) {
       const isJson =
         /^\s*[{[]/.test(resp.body_raw) &&
@@ -87,6 +89,7 @@ export class OpenAIAdapter implements AgentAdapter {
           if (Array.isArray(pj.output)) output = pj.output;
           usageRaw = pj.usage ?? null;
           model = pj.model;
+          if (typeof pj.status === "string") stopReason = pj.status;
         } catch {
           /* fall through to SSE */
         }
@@ -96,6 +99,7 @@ export class OpenAIAdapter implements AgentAdapter {
         output = sse.output;
         usageRaw = sse.usage;
         model = sse.model ?? model;
+        stopReason = sse.responseStatus ?? stopReason;
       }
     }
 
@@ -104,7 +108,16 @@ export class OpenAIAdapter implements AgentAdapter {
       const wire = itemToWire(it);
       if (wire) items.push(wire);
     }
-    return { items, usage: normalizeUsage(usageRaw), model, status };
+    return { items, usage: normalizeUsage(usageRaw), model, status, stopReason };
+  }
+
+  systemPromptText(pair: RawPair): string | null {
+    // The Responses API carries the harness system prompt in `instructions`;
+    // system/developer-role input items stay in the transcript and are not
+    // part of the registry-tracked prompt.
+    const instructions = pair?.request?.body?.instructions;
+    if (typeof instructions === "string" && instructions.trim()) return instructions;
+    return null;
   }
 }
 
@@ -197,6 +210,8 @@ interface ResponsesSSE {
   output: any[];
   usage: any;
   model?: string;
+  /** `response.status` from the terminal SSE event ("completed" / "failed" …). */
+  responseStatus?: string;
 }
 
 function parseResponsesSSE(raw: string): ResponsesSSE {
@@ -213,6 +228,8 @@ function parseResponsesSSE(raw: string): ResponsesSSE {
       output: terminal.response.output || [],
       usage: terminal.response.usage || null,
       model: terminal.response.model,
+      responseStatus:
+        typeof terminal.response.status === "string" ? terminal.response.status : undefined,
     };
   }
   return assembleFromDeltas(events);

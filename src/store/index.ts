@@ -5,9 +5,10 @@ import * as crypto from "crypto";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { RawPair } from "../types";
-import { buildTrajectories } from "../trajectory";
-import type { Trajectory, Step } from "../trajectory";
-import { analyze } from "../analytics";
+import { buildTrajectory, groupPairs } from "../trajectory";
+import type { PairGroup, Trajectory, Step } from "../trajectory";
+import { analyze, costForMetrics, priceFor } from "../analytics";
+import type { PriceTable } from "../analytics";
 
 /**
  * Local cross-session trace store + search.
@@ -159,6 +160,60 @@ export interface SessionSummary {
   errorCount: number;
 }
 
+/**
+ * One captured request/response pair's wire-level metrics. This is the layer
+ * session files can never reconstruct: exact per-call latency, TTFT, status,
+ * billed token counts and transcript size, straight from the proxy capture.
+ */
+export interface RequestRow {
+  sessionId: string;
+  /** 0-based capture order within the session. */
+  seq: number;
+  /** Request start (unix epoch seconds), 0 when unknown. */
+  ts: number;
+  model: string;
+  /** HTTP status code, null when the request never got a response. */
+  status: number | null;
+  /** Full request→last-byte duration, null when unknown. */
+  durationMs: number | null;
+  /** Request→first-byte latency (≈ time-to-first-token), null on old logs. */
+  ttftMs: number | null;
+  promptTokens: number;
+  completionTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  reasoningTokens: number;
+  /** Provider stop/finish reason, empty when unknown. */
+  stopReason: string;
+  /** True when the call failed (no response, or HTTP status >= 400). */
+  errored: boolean;
+  /** Number of flattened transcript items the request carried. */
+  transcriptItems: number;
+  /** sha256 of the normalized system prompt, empty when none was sent. */
+  promptHash: string;
+}
+
+/** A distinct system-prompt version seen on the wire (content-addressed). */
+export interface PromptSummary {
+  promptHash: string;
+  agent: string;
+  /** First/last time a request carried this prompt (unix epoch seconds). */
+  firstSeen: number;
+  lastSeen: number;
+  /** Approximate size, chars and ~tokens (chars/4). */
+  chars: number;
+  approxTokens: number;
+  /** How many captured requests / distinct sessions sent this prompt. */
+  requestCount: number;
+  sessionCount: number;
+}
+
+export interface PromptDetail extends PromptSummary {
+  content: string;
+  /** Distinct session ids that sent this prompt, most recent first. */
+  sessionIds: string[];
+}
+
 /** Session columns the dashboard is allowed to sort by (guards against SQL injection). */
 const SORTABLE_COLUMNS = new Set([
   "agent",
@@ -172,7 +227,7 @@ const SORTABLE_COLUMNS = new Set([
   "cost_usd",
 ]);
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Paths / discovery
@@ -319,12 +374,23 @@ function stepRow(step: Step): StepRow {
   };
 }
 
+export interface StoreOptions {
+  /**
+   * Price table used for cost estimation at index time (session cost_usd and
+   * per-step usage_events.cost_usd). Defaults to the built-in static table;
+   * callers can pass a fresher table (see `pricing.ts`).
+   */
+  prices?: PriceTable;
+}
+
 export class Store {
   readonly db: DatabaseType;
   readonly dbPath: string;
+  private readonly prices?: PriceTable;
 
-  constructor(dbPath: string = defaultDbPath()) {
+  constructor(dbPath: string = defaultDbPath(), options: StoreOptions = {}) {
     this.dbPath = dbPath;
+    this.prices = options.prices;
     if (dbPath !== ":memory:") {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
@@ -340,6 +406,27 @@ export class Store {
         key TEXT PRIMARY KEY,
         value TEXT
       );
+    `);
+
+    // Version-aware rebuild: every table is DERIVED data, re-creatable from the
+    // source .jsonl logs. On a schema bump we drop and recreate everything
+    // (including the file watermarks, so the next `tracetap index` fully
+    // repopulates) instead of maintaining ALTER-TABLE migration chains.
+    const prior = this.db
+      .prepare("SELECT value FROM meta WHERE key = 'schema_version'")
+      .get() as { value: string } | undefined;
+    if (prior && Number(prior.value) !== SCHEMA_VERSION) {
+      this.db.exec(`
+        DROP TABLE IF EXISTS files;
+        DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS steps_fts;
+        DROP TABLE IF EXISTS requests;
+        DROP TABLE IF EXISTS usage_events;
+        DROP TABLE IF EXISTS prompts;
+      `);
+    }
+
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS files (
         source_path  TEXT PRIMARY KEY,
         content_hash TEXT NOT NULL,
@@ -379,6 +466,54 @@ export class Store {
         error_flag UNINDEXED,
         tokenize = 'porter unicode61'
       );
+      CREATE TABLE IF NOT EXISTS requests (
+        id               INTEGER PRIMARY KEY,
+        session_id       TEXT NOT NULL,
+        seq              INTEGER NOT NULL,
+        ts               REAL,
+        model            TEXT,
+        status           INTEGER,
+        duration_ms      INTEGER,
+        ttft_ms          INTEGER,
+        prompt_tokens    INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read       INTEGER NOT NULL DEFAULT 0,
+        cache_creation   INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        stop_reason      TEXT NOT NULL DEFAULT '',
+        errored          INTEGER NOT NULL DEFAULT 0,
+        transcript_items INTEGER NOT NULL DEFAULT 0,
+        prompt_hash      TEXT NOT NULL DEFAULT '',
+        source_path      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_requests_ts      ON requests(ts);
+      CREATE INDEX IF NOT EXISTS idx_requests_source  ON requests(source_path);
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id               INTEGER PRIMARY KEY,
+        ts               REAL,
+        session_id       TEXT NOT NULL,
+        step_index       INTEGER,
+        agent            TEXT,
+        model            TEXT,
+        prompt_tokens    INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read       INTEGER NOT NULL DEFAULT 0,
+        cache_creation   INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd         REAL,
+        source_path      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_usage_ts      ON usage_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
+      CREATE INDEX IF NOT EXISTS idx_usage_source  ON usage_events(source_path);
+      CREATE TABLE IF NOT EXISTS prompts (
+        prompt_hash TEXT PRIMARY KEY,
+        agent       TEXT,
+        content     TEXT NOT NULL,
+        first_seen  REAL,
+        last_seen   REAL
+      );
     `);
     this.db
       .prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)")
@@ -410,14 +545,15 @@ export class Store {
     }
 
     const pairs = parsePairs(content);
-    const trajectories = buildTrajectories(pairs);
+    const groups = groupPairs(pairs);
 
     const run = this.db.transaction(() => {
       this.deleteSourceRows(sourcePath);
       let sessions = 0;
       let steps = 0;
-      for (const traj of trajectories) {
-        steps += this.insertTrajectory(traj, sourcePath, contentHash);
+      for (const group of groups) {
+        const traj = buildTrajectory(group);
+        steps += this.insertTrajectory(traj, group, sourcePath, contentHash);
         sessions += 1;
       }
       this.db
@@ -440,10 +576,19 @@ export class Store {
     const delFts = this.db.prepare("DELETE FROM steps_fts WHERE session_id = ?");
     for (const { session_id } of ids) delFts.run(session_id);
     this.db.prepare("DELETE FROM sessions WHERE source_path = ?").run(sourcePath);
+    this.db.prepare("DELETE FROM requests WHERE source_path = ?").run(sourcePath);
+    this.db.prepare("DELETE FROM usage_events WHERE source_path = ?").run(sourcePath);
+    // `prompts` rows are content-addressed and shared across sources; they are
+    // never deleted here (a prompt seen once remains a known version).
   }
 
-  private insertTrajectory(traj: Trajectory, sourcePath: string, contentHash: string): number {
-    const stats = analyze(traj);
+  private insertTrajectory(
+    traj: Trajectory,
+    group: PairGroup,
+    sourcePath: string,
+    contentHash: string,
+  ): number {
+    const stats = analyze(traj, this.prices ? { prices: this.prices } : {});
 
     let minTs = Infinity;
     let maxTs = -Infinity;
@@ -460,6 +605,8 @@ export class Store {
     // the same conversation re-captured in a different file) before inserting.
     this.db.prepare("DELETE FROM steps_fts WHERE session_id = ?").run(traj.sessionId);
     this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(traj.sessionId);
+    this.db.prepare("DELETE FROM requests WHERE session_id = ?").run(traj.sessionId);
+    this.db.prepare("DELETE FROM usage_events WHERE session_id = ?").run(traj.sessionId);
 
     this.db
       .prepare(
@@ -509,7 +656,121 @@ export class Store {
       );
       steps += 1;
     }
+
+    this.insertRequests(group, sourcePath);
+    this.insertUsageEvents(traj, sourcePath);
     return steps;
+  }
+
+  /** Write one wire-metrics row per captured pair + upsert prompt versions. */
+  private insertRequests(group: PairGroup, sourcePath: string): void {
+    const agentName = group.adapter.agentInfo(group.pairs[0]).name;
+    const ins = this.db.prepare(
+      `INSERT INTO requests(
+         session_id, seq, ts, model, status, duration_ms, ttft_ms,
+         prompt_tokens, completion_tokens, cache_read, cache_creation,
+         reasoning_tokens, stop_reason, errored, transcript_items,
+         prompt_hash, source_path
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const upsertPrompt = this.db.prepare(
+      `INSERT INTO prompts(prompt_hash, agent, content, first_seen, last_seen)
+       VALUES (@hash, @agent, @content, @ts, @ts)
+       ON CONFLICT(prompt_hash) DO UPDATE SET
+         first_seen = CASE
+           WHEN excluded.first_seen IS NULL THEN first_seen
+           WHEN first_seen IS NULL THEN excluded.first_seen
+           ELSE MIN(first_seen, excluded.first_seen) END,
+         last_seen = CASE
+           WHEN excluded.last_seen IS NULL THEN last_seen
+           WHEN last_seen IS NULL THEN excluded.last_seen
+           ELSE MAX(last_seen, excluded.last_seen) END`,
+    );
+
+    group.pairs.forEach((pair, seq) => {
+      const resp = group.adapter.parseResponse(pair);
+      const reqTs = typeof pair.request?.timestamp === "number" ? pair.request.timestamp : 0;
+      const respTs = pair.response?.timestamp;
+      const firstByte = pair.response?.first_byte_timestamp;
+      const status = pair.response ? (pair.response.status_code ?? 0) : null;
+      const errored = !pair.response || (typeof status === "number" && status >= 400);
+
+      const durationMs =
+        typeof respTs === "number" && reqTs > 0 && respTs >= reqTs
+          ? Math.round((respTs - reqTs) * 1000)
+          : null;
+      const ttftMs =
+        typeof firstByte === "number" && reqTs > 0 && firstByte >= reqTs
+          ? Math.round((firstByte - reqTs) * 1000)
+          : null;
+
+      const promptText = group.adapter.systemPromptText(pair);
+      let promptHash = "";
+      if (promptText) {
+        promptHash = sha256Hex(promptText);
+        upsertPrompt.run({
+          hash: promptHash,
+          agent: agentName,
+          content: promptText,
+          ts: reqTs > 0 ? reqTs : null,
+        });
+      }
+
+      const model =
+        resp.model ?? (group.adapter.agentInfo(pair).model || "") ?? "";
+      const u = resp.usage;
+      ins.run(
+        group.sessionId,
+        seq,
+        reqTs,
+        model,
+        status,
+        durationMs,
+        ttftMs,
+        u?.promptTokens ?? 0,
+        u?.completionTokens ?? 0,
+        u?.cacheReadTokens ?? 0,
+        u?.cacheCreationTokens ?? 0,
+        u?.reasoningTokens ?? 0,
+        resp.stopReason ?? "",
+        errored ? 1 : 0,
+        group.adapter.parseRequestItems(pair).length,
+        promptHash,
+        sourcePath,
+      );
+    });
+  }
+
+  /** Write one time-stamped usage event per agent step (powers `tracetap usage`). */
+  private insertUsageEvents(traj: Trajectory, sourcePath: string): void {
+    const ins = this.db.prepare(
+      `INSERT INTO usage_events(
+         ts, session_id, step_index, agent, model, prompt_tokens,
+         completion_tokens, cache_read, cache_creation, reasoning_tokens,
+         cost_usd, source_path
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const model = traj.agent?.model ?? "";
+    const price = model ? priceFor(model, this.prices ?? undefined) : null;
+    for (const step of traj.steps) {
+      if (step.role !== "agent" || !step.metrics) continue;
+      const m = step.metrics;
+      const cost = price ? costForMetrics(m, price) : null;
+      ins.run(
+        step.timestamp > 0 ? step.timestamp : null,
+        traj.sessionId,
+        step.index,
+        traj.agent?.name ?? "unknown",
+        model,
+        m.promptTokens,
+        m.completionTokens,
+        m.cacheReadTokens,
+        m.cacheCreationTokens,
+        m.reasoningTokens ?? 0,
+        cost,
+        sourcePath,
+      );
+    }
   }
 
   /**
@@ -781,6 +1042,128 @@ export class Store {
     const rows = this.listSessions();
     return rows.find((s) => s.sessionId === sessionId) ?? null;
   }
+
+  // -- wire metrics ----------------------------------------------------------
+
+  /** Per-request wire metrics for one session, in capture order. */
+  listRequests(sessionId: string): RequestRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, seq, ts, model, status, duration_ms, ttft_ms,
+                prompt_tokens, completion_tokens, cache_read, cache_creation,
+                reasoning_tokens, stop_reason, errored, transcript_items, prompt_hash
+         FROM requests WHERE session_id = ? ORDER BY seq`,
+      )
+      .all(sessionId) as any[];
+    return rows.map(
+      (r): RequestRow => ({
+        sessionId: String(r.session_id),
+        seq: Number(r.seq),
+        ts: Number(r.ts ?? 0),
+        model: String(r.model ?? ""),
+        status: r.status == null ? null : Number(r.status),
+        durationMs: r.duration_ms == null ? null : Number(r.duration_ms),
+        ttftMs: r.ttft_ms == null ? null : Number(r.ttft_ms),
+        promptTokens: Number(r.prompt_tokens ?? 0),
+        completionTokens: Number(r.completion_tokens ?? 0),
+        cacheRead: Number(r.cache_read ?? 0),
+        cacheCreation: Number(r.cache_creation ?? 0),
+        reasoningTokens: Number(r.reasoning_tokens ?? 0),
+        stopReason: String(r.stop_reason ?? ""),
+        errored: Number(r.errored ?? 0) === 1,
+        transcriptItems: Number(r.transcript_items ?? 0),
+        promptHash: String(r.prompt_hash ?? ""),
+      }),
+    );
+  }
+
+  // -- prompt registry -------------------------------------------------------
+
+  /**
+   * Every distinct system-prompt version on record, most recently seen first,
+   * with usage counts derived from the requests table (always consistent under
+   * the drop-and-rebuild indexing model).
+   */
+  listPrompts(filters: { agent?: string; limit?: number } = {}): PromptSummary[] {
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (filters.agent) {
+      where.push("lower(p.agent) = lower(@agent)");
+      params.agent = filters.agent;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const limitSql = typeof filters.limit === "number" ? "LIMIT @limit" : "";
+    if (typeof filters.limit === "number") params.limit = Math.max(1, Math.floor(filters.limit));
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           p.prompt_hash AS promptHash,
+           p.agent       AS agent,
+           p.first_seen  AS firstSeen,
+           p.last_seen   AS lastSeen,
+           length(p.content) AS chars,
+           (SELECT COUNT(*) FROM requests r WHERE r.prompt_hash = p.prompt_hash) AS requestCount,
+           (SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE r.prompt_hash = p.prompt_hash) AS sessionCount
+         FROM prompts p
+         ${whereSql}
+         ORDER BY p.last_seen DESC
+         ${limitSql}`,
+      )
+      .all(params) as any[];
+    return rows.map((r) => promptSummaryFromRow(r));
+  }
+
+  /** Full content + using sessions for one prompt version (by full or prefix hash). */
+  getPrompt(hashOrPrefix: string): PromptDetail | null {
+    const row = this.db
+      .prepare(
+        `SELECT
+           p.prompt_hash AS promptHash,
+           p.agent       AS agent,
+           p.content     AS content,
+           p.first_seen  AS firstSeen,
+           p.last_seen   AS lastSeen,
+           length(p.content) AS chars,
+           (SELECT COUNT(*) FROM requests r WHERE r.prompt_hash = p.prompt_hash) AS requestCount,
+           (SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE r.prompt_hash = p.prompt_hash) AS sessionCount
+         FROM prompts p
+         WHERE p.prompt_hash = @h OR p.prompt_hash LIKE @h || '%'
+         ORDER BY p.last_seen DESC
+         LIMIT 1`,
+      )
+      .get({ h: hashOrPrefix }) as any | undefined;
+    if (!row) return null;
+    const sessionRows = this.db
+      .prepare(
+        `SELECT DISTINCT session_id, MAX(ts) AS lastTs FROM requests
+         WHERE prompt_hash = ? GROUP BY session_id ORDER BY lastTs DESC`,
+      )
+      .all(String(row.promptHash)) as any[];
+    return {
+      ...promptSummaryFromRow(row),
+      content: String(row.content ?? ""),
+      sessionIds: sessionRows.map((s) => String(s.session_id)),
+    };
+  }
+}
+
+function sha256Hex(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function promptSummaryFromRow(r: any): PromptSummary {
+  const chars = Number(r.chars ?? 0);
+  return {
+    promptHash: String(r.promptHash),
+    agent: String(r.agent ?? ""),
+    firstSeen: Number(r.firstSeen ?? 0),
+    lastSeen: Number(r.lastSeen ?? 0),
+    chars,
+    approxTokens: Math.round(chars / 4),
+    requestCount: Number(r.requestCount ?? 0),
+    sessionCount: Number(r.sessionCount ?? 0),
+  };
 }
 
 // ---------------------------------------------------------------------------

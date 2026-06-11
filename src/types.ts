@@ -8,6 +8,10 @@ export interface RawPair {
   };
   response: {
     timestamp: number;
+    // Wall-clock time (epoch seconds) when the FIRST body byte arrived from
+    // upstream. Lets consumers derive time-to-first-token; absent for empty
+    // bodies and for logs captured before this field existed.
+    first_byte_timestamp?: number;
     status_code: number;
     headers: Record<string, string>;
     body?: any;

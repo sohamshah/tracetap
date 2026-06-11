@@ -1,22 +1,24 @@
 {
   "name": "tracetap",
   "version": "0.2.0",
-  "description": "Capture the full trajectory of a coding-agent harness (Claude Code, Codex) — request bodies, system prompts, tools, streamed responses, token usage — into a JSONL log and a self-contained HTML viewer, by proxying the agent's API traffic through a local HTTP server.",
+  "description": "Capture the full trajectory of a coding-agent harness (Claude Code, Codex, Gemini CLI) — request bodies, system prompts, tools, streamed responses, token usage — into a JSONL log and a self-contained HTML viewer, by proxying the agent's API traffic through a local HTTP server.",
   "main": "dist/tracetap.js",
   "bin": {
     "tracetap": "dist/tracetap.js"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/tracetap.js dist/claude-cli.js dist/codex-cli.js",
+    "build": "tsc && chmod +x dist/tracetap.js dist/claude-cli.js dist/codex-cli.js dist/gemini-cli.js",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "files": [
     "dist/**/*",
     "frontend/dist/**/*",
     "frontend/template.html",
     "frontend/codex-template.html",
+    "frontend/gemini-template.html",
     "frontend/patches/**/*",
     "README.md",
     "LICENSE"
@@ -30,6 +32,9 @@
     "anthropic",
     "codex",
     "openai",
+    "gemini",
+    "gemini-cli",
+    "google",
     "agent",
     "coding-agent",
     "logging",
@@ -55,7 +60,14 @@
     "access": "public"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.0.0",
+    "@types/react": "^17.0.93",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "ink": "^3.2.0",
+    "react": "^17.0.2"
   }
 }

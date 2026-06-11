@@ -191,6 +191,8 @@ export interface RequestRow {
   transcriptItems: number;
   /** sha256 of the normalized system prompt, empty when none was sent. */
   promptHash: string;
+  /** 1-based index of the transcript step this call produced, null when none. */
+  agentStepIndex: number | null;
 }
 
 /** One indexed step's text content (the transcript row the FTS index holds). */
@@ -270,7 +272,7 @@ const SORTABLE_COLUMNS = new Set([
   "cost_usd",
 ]);
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Paths / discovery
@@ -527,6 +529,7 @@ export class Store {
         errored          INTEGER NOT NULL DEFAULT 0,
         transcript_items INTEGER NOT NULL DEFAULT 0,
         prompt_hash      TEXT NOT NULL DEFAULT '',
+        agent_step_index INTEGER,
         source_path      TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id, seq);
@@ -700,21 +703,26 @@ export class Store {
       steps += 1;
     }
 
-    this.insertRequests(group, sourcePath);
+    this.insertRequests(group, traj, sourcePath);
     this.insertUsageEvents(traj, sourcePath);
     return steps;
   }
 
   /** Write one wire-metrics row per captured pair + upsert prompt versions. */
-  private insertRequests(group: PairGroup, sourcePath: string): void {
+  private insertRequests(group: PairGroup, traj: Trajectory, sourcePath: string): void {
     const agentName = group.adapter.agentInfo(group.pairs[0]).name;
+    // Agent steps were emitted by buildOne in pair order, one per pair whose
+    // response parsed to items or usage. Replaying that predicate over the same
+    // pairs lets each request row record WHICH transcript step it produced.
+    const agentSteps = traj.steps.filter((s) => s.role === "agent");
+    let agentCursor = 0;
     const ins = this.db.prepare(
       `INSERT INTO requests(
          session_id, seq, ts, model, status, duration_ms, ttft_ms,
          prompt_tokens, completion_tokens, cache_read, cache_creation,
          reasoning_tokens, stop_reason, errored, transcript_items,
-         prompt_hash, source_path
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         prompt_hash, agent_step_index, source_path
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const upsertPrompt = this.db.prepare(
       `INSERT INTO prompts(prompt_hash, agent, content, first_seen, last_seen)
@@ -762,6 +770,8 @@ export class Store {
       const model =
         resp.model ?? (group.adapter.agentInfo(pair).model || "") ?? "";
       const u = resp.usage;
+      const producedStep = resp.items.length > 0 || resp.usage != null;
+      const agentStepIndex = producedStep ? (agentSteps[agentCursor++]?.index ?? null) : null;
       ins.run(
         group.sessionId,
         seq,
@@ -779,6 +789,7 @@ export class Store {
         errored ? 1 : 0,
         group.adapter.parseRequestItems(pair).length,
         promptHash,
+        agentStepIndex,
         sourcePath,
       );
     });
@@ -1186,7 +1197,8 @@ export class Store {
       .prepare(
         `SELECT session_id, seq, ts, model, status, duration_ms, ttft_ms,
                 prompt_tokens, completion_tokens, cache_read, cache_creation,
-                reasoning_tokens, stop_reason, errored, transcript_items, prompt_hash
+                reasoning_tokens, stop_reason, errored, transcript_items, prompt_hash,
+                agent_step_index
          FROM requests WHERE session_id = ? ORDER BY seq`,
       )
       .all(sessionId) as any[];
@@ -1208,6 +1220,7 @@ export class Store {
         errored: Number(r.errored ?? 0) === 1,
         transcriptItems: Number(r.transcript_items ?? 0),
         promptHash: String(r.prompt_hash ?? ""),
+        agentStepIndex: r.agent_step_index == null ? null : Number(r.agent_step_index),
       }),
     );
   }

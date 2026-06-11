@@ -102,8 +102,15 @@ export function composePage(): string {
   const dir = assetDir();
   const html = fs.readFileSync(path.join(dir, "app.html"), "utf-8");
   const css = fs.readFileSync(path.join(dir, "app.css"), "utf-8");
+  const charts = fs.readFileSync(path.join(dir, "charts.js"), "utf-8");
   const js = fs.readFileSync(path.join(dir, "app.js"), "utf-8");
-  return html.split("/*__TRACETAP_CSS__*/").join(css).split("/*__TRACETAP_JS__*/").join(js);
+  return html
+    .split("/*__TRACETAP_CSS__*/")
+    .join(css)
+    .split("/*__TRACETAP_CHARTS_JS__*/")
+    .join(charts)
+    .split("/*__TRACETAP_JS__*/")
+    .join(js);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +170,10 @@ function fleetAnalytics(store: Store, prices: PriceTable) {
     string,
     { agent: string; sessions: Set<string>; costUsd: number; promptTokens: number; completionTokens: number }
   >();
+  const perProject = new Map<
+    string,
+    { project: string; sessions: Set<string>; costUsd: number; events: number; completionTokens: number }
+  >();
   const trendByDay = new Map<string, { date: string; costUsd: number; events: number }>();
 
   for (const ev of events) {
@@ -194,6 +205,17 @@ function fleetAnalytics(store: Store, prices: PriceTable) {
     if (cost != null) pa.costUsd += cost;
     pa.promptTokens += ev.promptTokens;
     pa.completionTokens += ev.completionTokens;
+
+    const projKey = ev.projectCwd || "(unknown)";
+    let pp = perProject.get(projKey);
+    if (!pp) {
+      pp = { project: projKey, sessions: new Set(), costUsd: 0, events: 0, completionTokens: 0 };
+      perProject.set(projKey, pp);
+    }
+    pp.sessions.add(ev.sessionId);
+    if (cost != null) pp.costUsd += cost;
+    pp.events += 1;
+    pp.completionTokens += ev.completionTokens;
 
     if (ev.ts > 0) {
       const date = new Date(ev.ts * 1000).toISOString().slice(0, 10);
@@ -246,6 +268,9 @@ function fleetAnalytics(store: Store, prices: PriceTable) {
         errorRate: pm.requests ? pm.errored / pm.requests : 0,
         ttftP50: percentile(pm.ttfts, 0.5),
         ttftP95: percentile(pm.ttfts, 0.95),
+        // Distribution band for the strip chart: p10/p25/p50/p75/p90/p95.
+        ttftPcts: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95].map((q) => percentile(pm.ttfts, q)),
+        ttftN: pm.ttfts.length,
         durP50: percentile(pm.durs, 0.5),
         completionTokens: pm.completionTokens,
       };
@@ -303,8 +328,18 @@ function fleetAnalytics(store: Store, prices: PriceTable) {
       }))
       .sort((a, b) => b.costUsd - a.costUsd),
     perModel,
+    perProject: [...perProject.values()]
+      .map((pp) => ({
+        project: pp.project,
+        sessions: pp.sessions.size,
+        costUsd: pp.costUsd,
+        events: pp.events,
+        completionTokens: pp.completionTokens,
+      }))
+      .sort((a, b) => b.costUsd - a.costUsd),
     topTools,
-    trend: [...trendByDay.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45),
+    // 26 weeks of daily buckets — feeds the calendar heatmap.
+    trend: [...trendByDay.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-182),
     compactions: { totalCompactions: compactionRow.total, sessionsWithCompaction: compactionRow.sessions },
     topSessions,
   };

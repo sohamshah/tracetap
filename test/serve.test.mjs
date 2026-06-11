@@ -226,6 +226,17 @@ test("GET /api/analytics returns fleet rollups with wire metrics", async () => {
   assert.ok(Array.isArray(a.topTools) && a.topTools.length >= 1);
   assert.ok(a.compactions.totalCompactions >= 0);
   assert.ok(a.topSessions.length >= 1);
+
+  // UI feeds: project rollup + TTFT distribution bands.
+  assert.ok(Array.isArray(a.perProject) && a.perProject.length >= 1);
+  for (const p of a.perProject) {
+    assert.equal(typeof p.project, "string");
+    assert.ok(p.sessions >= 1 && p.events >= 1);
+  }
+  for (const m of a.perModel) {
+    assert.equal(m.ttftPcts.length, 6);
+    assert.equal(typeof m.ttftN, "number");
+  }
 });
 
 test("GET /api/prompts + /api/prompt/<hash> expose the registry", async () => {

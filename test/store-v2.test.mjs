@@ -249,3 +249,30 @@ test("schema bump drops and rebuilds all derived tables", () => {
   assert.ok(s2.db.prepare("SELECT COUNT(*) AS n FROM requests").get().n > 0);
   s2.close();
 });
+
+test("requests link to the transcript step they produced (agent_step_index)", () => {
+  // OK call → links to an agent-role step; 429 and orphaned calls → null.
+  const sOk = sessionByModelText("You are wired. v1");
+  const [ok] = store.listRequests(sOk.sessionId);
+  const steps = store.listSteps(sOk.sessionId);
+  assert.ok(ok.agentStepIndex != null, "successful call should link to a step");
+  const linked = steps.find((st) => st.stepIndex === ok.agentStepIndex);
+  assert.ok(linked, "linked step exists in transcript");
+  assert.equal(linked.role, "agent");
+
+  const sBad = sessionByModelText("You are wired. v2");
+  for (const r of store.listRequests(sBad.sessionId)) {
+    assert.equal(r.agentStepIndex, null, `errored call seq=${r.seq} must not link`);
+  }
+
+  // Multi-turn session: every successful call maps to a distinct agent step.
+  const s2 = sessionByModelText("You are Claude Code.");
+  const reqs2 = store.listRequests(s2.sessionId);
+  const steps2 = store.listSteps(s2.sessionId);
+  const indices = reqs2.map((r) => r.agentStepIndex);
+  assert.equal(new Set(indices).size, indices.length, "step links are distinct");
+  for (const idx of indices) {
+    const st = steps2.find((x) => x.stepIndex === idx);
+    assert.ok(st && st.role === "agent", `step ${idx} is an agent step`);
+  }
+});

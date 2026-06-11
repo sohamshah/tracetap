@@ -255,6 +255,41 @@ export function redactBodies<T>(input: T, opts: RedactOptions = {}): T {
   return redactValue(input, opts);
 }
 
+/**
+ * One detector hit inside a string, NOT rewritten. `token` is the raw matched
+ * secret — callers must fingerprint/mask it and never print it verbatim.
+ */
+export interface TextFinding {
+  type: string;
+  index: number;
+  token: string;
+}
+
+/**
+ * Detect-only twin of {@link redactString}: report every place a detector
+ * would fire, without rewriting anything. Skips matches that are already
+ * redaction placeholders, so auditing a redacted log reports clean.
+ */
+export function detectSecrets(text: string, opts: RedactOptions = {}): TextFinding[] {
+  const mode = opts.mode ?? "standard";
+  if (mode === "off" || !text) return [];
+  const findings: TextFinding[] = [];
+  for (const det of activeDetectors(mode)) {
+    det.pattern.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = det.pattern.exec(text)) !== null) {
+      const groups = m.slice(1);
+      if (det.validate && !det.validate(m[0], ...groups)) continue;
+      if (m[0].includes("[REDACTED:")) continue;
+      // For render-style detectors (bearer/env) the secret is the last group.
+      const token = groups.length ? groups[groups.length - 1] : m[0];
+      findings.push({ type: det.type, index: m.index, token });
+      if (!det.pattern.global) break;
+    }
+  }
+  return findings;
+}
+
 /** Count redaction placeholders in a value (handy for stats / tests). */
 export function countRedactions(value: unknown): number {
   const json = typeof value === "string" ? value : JSON.stringify(value);

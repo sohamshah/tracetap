@@ -127,6 +127,7 @@
     else if (h === "usage") renderUsage();
     else if (h === "analytics") renderAnalytics();
     else if (h === "prompts") renderPrompts();
+    else if (h === "audit") renderAudit();
     else renderSessions();
 
     var tab = h.split("/")[0];
@@ -782,6 +783,76 @@
     });
     flushRun(true);
     return out.join("");
+  }
+
+  // ----------------------------------------------------------------- audit
+  var audit = { mode: "standard" };
+
+  function renderAudit() {
+    current = { name: "audit" };
+    setView(
+      '<div class="controls">' +
+      '<label class="check"><input id="a-strict" type="checkbox"' + (audit.mode === "strict" ? " checked" : "") +
+      "/> strict detectors (entropy-gated, may false-positive)</label>" +
+      '<span class="spacer"></span></div>' +
+      '<div id="a-body"><div class="meta-line">Scanning indexed logs…</div></div>'
+    );
+    document.getElementById("a-strict").addEventListener("change", function () {
+      audit.mode = this.checked ? "strict" : "standard";
+      loadAudit();
+    });
+    loadAudit();
+  }
+
+  function loadAudit() {
+    var body = document.getElementById("a-body");
+    if (!body) return;
+    body.innerHTML = '<div class="meta-line">Scanning indexed logs…</div>';
+    fetchJSON("/api/audit?mode=" + audit.mode).then(function (r) {
+      if (current.name !== "audit") return;
+      drawAudit(r);
+    }).catch(fail);
+  }
+
+  function drawAudit(r) {
+    var body = document.getElementById("a-body");
+    if (!body) return;
+    var cards =
+      card("Files scanned", r.filesScanned) +
+      card("API calls scanned", r.pairsScanned) +
+      card("Distinct secrets", r.groups.length, r.groups.length > 0) +
+      card("Egress occurrences", r.totalEgress, r.totalEgress > 0) +
+      card("In responses", r.totalResponse, r.totalResponse > 0);
+
+    var html = '<div class="cards">' + cards + "</div>";
+
+    if (!r.groups.length) {
+      html += '<div class="empty">✓ No secrets detected on the wire (' + esc(r.mode) + " detectors).</div>";
+    } else {
+      html += '<div class="meta-line warn-text">Transcript resending means a secret egresses on EVERY later turn — rotate the credentials below.</div>' +
+        '<div class="tbl-wrap"><table><thead><tr>' +
+        '<th>Type</th><th>Fingerprint</th><th class="num">Len</th><th class="num">Egressed</th><th class="num">In responses</th><th>Where</th><th>First → last</th><th>Files</th>' +
+        "</tr></thead><tbody>" +
+        r.groups.map(function (g) {
+          return "<tr><td><span class=\"pill err\">" + esc(g.type) + "</span></td>" +
+            '<td class="hash">' + esc(g.fingerprint) + (g.last4 ? "…" + esc(g.last4) : "") + "</td>" +
+            '<td class="num">' + g.tokenLength + "</td>" +
+            '<td class="num">' + (g.egressCount ? '<b class="warn-text">' + g.egressCount + "×</b>" : "0") + "</td>" +
+            '<td class="num">' + (g.responseCount || 0) + "</td>" +
+            "<td>" + esc(g.locations.join(", ")) + "</td>" +
+            '<td class="dim">' + fmtTime(g.firstTs) + " → " + fmtTime(g.lastTs) + "</td>" +
+            '<td class="dim">' + g.files.map(function (f) { return esc(basename(f)); }).join("<br/>") + "</td></tr>";
+        }).join("") +
+        "</tbody></table></div>";
+    }
+
+    if (r.redactCheck) {
+      html += '<div class="note">redact-check: capture-time <code>--redact standard</code> would mask ' +
+        r.redactCheck.standardMasked + ", <code>--redact strict</code> " + r.redactCheck.strictMasked +
+        " of " + r.redactCheck.total + " detected occurrence(s). " +
+        "Capture with <code>tracetap claude --redact standard</code> to mask at write time.</div>";
+    }
+    body.innerHTML = html;
   }
 
   // -------------------------------------------------------------- SSE live

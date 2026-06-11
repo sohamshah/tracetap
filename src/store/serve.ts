@@ -9,6 +9,8 @@ import type { PriceTable } from "../analytics";
 import { loadPrices } from "../pricing";
 import { aggregateUsage, parseWhen } from "../usage";
 import type { Granularity } from "../usage";
+import { auditFiles } from "../audit";
+import type { AuditReport } from "../audit";
 
 /**
  * `tracetap serve` — the local observatory over the cross-session store.
@@ -309,6 +311,39 @@ function fleetAnalytics(store: Store, prices: PriceTable) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit (memoized per file content hash)
+// ---------------------------------------------------------------------------
+
+const auditMemo = new Map<string, AuditReport>();
+
+/**
+ * Run the egress-secret audit over every source file the index knows about.
+ * Memoized on (mode + per-file content hashes), so repeat dashboard visits
+ * are free until a re-index changes a file.
+ */
+function auditIndexedFiles(store: Store, mode: "standard" | "strict"): AuditReport {
+  const rows = store.db
+    .prepare("SELECT source_path AS p, content_hash AS h FROM files ORDER BY source_path")
+    .all() as { p: string; h: string }[];
+  const memoKey = mode + "|" + rows.map((r) => r.p + ":" + r.h).join("|");
+  const hit = auditMemo.get(memoKey);
+  if (hit) return hit;
+
+  const files: { path: string; content: string }[] = [];
+  for (const r of rows) {
+    try {
+      files.push({ path: r.p, content: fs.readFileSync(r.p, "utf-8") });
+    } catch {
+      /* source file moved/deleted since indexing — skip */
+    }
+  }
+  const report = auditFiles(files, { mode, redactCheck: true });
+  auditMemo.clear(); // only the latest index state is worth caching
+  auditMemo.set(memoKey, report);
+  return report;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP plumbing
 // ---------------------------------------------------------------------------
 
@@ -541,6 +576,12 @@ export async function handleRequest(
         return;
       }
       sendJson(res, 200, prompt);
+      return;
+    }
+
+    if (pathname === "/api/audit") {
+      const mode = q.get("mode") === "strict" ? "strict" : "standard";
+      sendJson(res, 200, auditIndexedFiles(store, mode));
       return;
     }
 

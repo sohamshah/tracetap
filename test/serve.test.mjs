@@ -257,3 +257,15 @@ test("GET /api/events is a live SSE stream", async () => {
   assert.match(text, /event: hello/);
   ac.abort();
 });
+
+test("GET /api/audit scans indexed source files (memoized)", async () => {
+  const r = await get("/api/audit");
+  assert.equal(r.status, 200);
+  const report = JSON.parse(r.text);
+  assert.ok(report.filesScanned >= 1);
+  assert.ok(report.pairsScanned >= 3);
+  assert.ok(Array.isArray(report.groups));
+  assert.ok(report.redactCheck, "serve audit always includes redact-check");
+  const strict = JSON.parse((await get("/api/audit?mode=strict")).text);
+  assert.equal(strict.mode, "strict");
+});

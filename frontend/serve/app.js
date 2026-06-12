@@ -755,8 +755,8 @@
       return { label: b.slice(5) || b, value: byBucket[b], title: b + ": " + fmtCost(byBucket[b]) };
     });
     if (report.granularity !== "total" && items.length > 1) {
-      chart.innerHTML = '<div class="chart-box"><div class="chart-title">Cost per ' +
-        esc(report.granularity.replace(/ly$/, "")) + "</div>" +
+      chart.innerHTML = '<div class="chart-box"><div class="chart-title"><span class="fig">FIG.1</span>Cost per ' +
+        ({ daily: "day", weekly: "week", monthly: "month" }[report.granularity] || report.granularity) + "</div>" +
         columnChart(items, { height: 130, labels: true, colWidth: 34 }) + "</div>";
     } else chart.innerHTML = "";
 

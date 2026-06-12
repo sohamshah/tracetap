@@ -492,9 +492,15 @@ several-hundred-MB footprint by default.
 `tracetap serve` starts the **observatory** — a local web dashboard over the
 same index. It is read-only and dependency-light (Node's built-in HTTP server
 only — no framework, no build step, no auth, no cloud), binds to `127.0.0.1`
-by default, and serves ONE self-contained page (all CSS/JS inlined, dark/light
-theme). An SSE stream watches the index database, so running `tracetap index`
-in another terminal live-refreshes whatever view is open.
+by default, and serves ONE self-contained page (all CSS/JS inlined; webfonts
+are progressive enhancement with monospace fallbacks, so it works offline).
+An SSE stream watches the index database, so running `tracetap index` in
+another terminal live-refreshes whatever view is open — a status bar shows the
+db path, index counts, and price source.
+
+The whole UI is keyboard-driven: `⌘K` opens a fuzzy command palette over every
+session, prompt version, and view; `/` focuses search; `j`/`k` + `↵` walk and
+open rows; `1`–`5` switch views; `Esc` backs out; `?` shows the cheat sheet.
 
 ```bash
 # Serve the observatory at http://127.0.0.1:4000
@@ -518,17 +524,22 @@ Five views:
 - **Session detail** — the flight-recorder view of one session: stat cards
   (cost, TTFT p50, cache hit, compactions), a **context-growth lane**
   (transcript items per call, compactions flagged), a stacked **token-flow
-  lane** (cache read/write vs fresh input vs output per call), a
-  **request waterfall** (per-call bars segmented into waiting-for-first-byte vs
-  streaming, with HTTP status and stop reason), and the full collapsible
-  transcript (reasoning, tool inputs, observations). Links to the session's
-  original self-contained HTML wire report when it exists on disk.
+  lane** (cache read/write vs fresh input vs output per call), and a
+  **request waterfall** linked to the transcript — every bar knows which step
+  it produced: hover for the full wire breakdown (TTFT vs streaming time,
+  fresh/cached/output tokens, stop reason, prompt hash), click to jump to the
+  step. The transcript renders agent markdown, token-colored JSON tool args,
+  **Edit-tool calls as real line diffs**, shell calls as command lines, and a
+  minimap rail tracks scroll position. Search hits deep-link straight to the
+  matching step. Links to the session's original self-contained HTML wire
+  report when it exists on disk.
 - **Usage** — the `tracetap usage` report in chart + table form (granularity,
   per-model breakdown, date range).
-- **Analytics** — fleet rollups: total cost / cache-hit rate / call error rate,
-  daily cost trend, **per-model wire latency** (TTFT p50/p95, duration p50,
-  error rate — measured from your own traffic, not provider status pages), per
-  agent totals, top tools, top sessions by cost, mid-task compaction counts.
+- **Analytics** — fleet rollups: total cost / cache-hit rate / call error rate
+  stat cards, a **26-week cost calendar heatmap**, a **spend-by-project
+  treemap**, **TTFT distribution strips per model** (p10–p95 bands measured
+  from your own traffic, not provider status pages), per-model and per-agent
+  tables, top tools, top sessions by cost, mid-task compaction counts.
 - **Prompts** — the system-prompt registry: every distinct prompt version seen
   on the wire (content-addressed; volatile fragments normalized away), with
   usage counts and a **line diff between any two versions** — see exactly what

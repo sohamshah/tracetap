@@ -1,6 +1,6 @@
 {
   "name": "tracetap",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Capture the full trajectory of a coding-agent harness (Claude Code, Codex, Gemini CLI) — request bodies, system prompts, tools, streamed responses, token usage — into a JSONL log and a self-contained HTML viewer, by proxying the agent's API traffic through a local HTTP server.",
   "main": "dist/tracetap.js",
   "bin": {

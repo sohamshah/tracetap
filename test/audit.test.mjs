@@ -137,3 +137,59 @@ test("CLI: exit 1 + JSON report on egress findings, exit 0 when clean", () => {
   assert.equal(JSON.parse(cleanOut).groups.length, 0);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test("auditFilePaths streams files with identical results to auditFiles", async () => {
+  const { auditFilePaths } = await import("../dist/audit.js");
+  const lines = [
+    JSON.stringify(pair(1, "deploy with " + GH_TOKEN, "ok")),
+    JSON.stringify(pair(2, "now use " + SK_KEY, "done " + GH_TOKEN)),
+    "not json at all",
+    JSON.stringify({ unrelated: true }),
+  ].join("\n");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tt-audit-"));
+  const file = path.join(dir, "log.jsonl");
+  fs.writeFileSync(file, lines + "\n");
+
+  const inMem = auditFiles([{ path: file, content: lines }], { mode: "standard", redactCheck: true });
+  const streamed = await auditFilePaths([file], { mode: "standard", redactCheck: true });
+  assert.deepEqual(streamed, inMem);
+  assert.equal(streamed.pairsScanned, 2);
+  assert.ok(streamed.totalEgress >= 2);
+
+  // deleted/unreadable files are skipped, never fatal
+  const withMissing = await auditFilePaths([path.join(dir, "gone.jsonl"), file], { mode: "standard" });
+  assert.equal(withMissing.filesScanned, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("auditFilePaths memory stays bounded on large logs (streaming regression)", async () => {
+  // 40MB of pairs scanned inside a 64MB-heap child: whole-file loading
+  // (UTF-16 doubling + per-pair redact clones) cannot fit; streaming can.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tt-audit-big-"));
+  const file = path.join(dir, "big.jsonl");
+  const filler = "x".repeat(64 * 1024);
+  const ws = fs.openSync(file, "w");
+  for (let i = 0; i < 600; i++) {
+    const p = pair(i, "chunk " + i + " " + filler + (i === 250 ? " leak " + GH_TOKEN : ""), "ok");
+    fs.writeSync(ws, JSON.stringify(p) + "\n");
+  }
+  fs.closeSync(ws);
+  const sizeMb = Math.round(fs.statSync(file).size / 1024 / 1024);
+  assert.ok(sizeMb >= 35, `fixture should be ~40MB, got ${sizeMb}MB`);
+
+  const script = `
+    import("${path.join(__dirname, "..", "dist", "audit.js").replace(/\\/g, "/")}").then(async (m) => {
+      const r = await m.auditFilePaths(["${file.replace(/\\/g, "/")}"], { mode: "standard", redactCheck: true });
+      console.log(JSON.stringify({ pairs: r.pairsScanned, egress: r.totalEgress, groups: r.groups.length }));
+    });
+  `;
+  const out = execFileSync(process.execPath, ["--max-old-space-size=64", "-e", script], {
+    encoding: "utf-8",
+    timeout: 120000,
+  });
+  const r = JSON.parse(out.trim().split("\n").pop());
+  assert.equal(r.pairs, 600);
+  assert.ok(r.egress >= 1, "the planted token must be found");
+  assert.equal(r.groups, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

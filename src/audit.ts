@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as readline from "readline";
 import { detectSecrets, redactBodies, countRedactions } from "./redact";
 import type { RedactMode } from "./redact";
 
@@ -221,49 +222,116 @@ function parsePairsLoose(content: string): Pairish[] {
   return pairs;
 }
 
-/** Audit a set of already-parsed files. Exposed for serve and tests. */
-export function auditFiles(
-  files: { path: string; content: string }[],
-  opts: { mode?: RedactMode; redactCheck?: boolean } = {},
-): AuditReport {
-  const mode: RedactMode = opts.mode ?? "standard";
-  const occurrences: AuditOccurrence[] = [];
-  let pairsScanned = 0;
-  let standardMasked = 0;
-  let strictMasked = 0;
+/** Mutable accumulator shared by the in-memory and streaming scanners. */
+interface ScanState {
+  mode: RedactMode;
+  redactCheck: boolean;
+  occurrences: AuditOccurrence[];
+  filesScanned: number;
+  pairsScanned: number;
+  standardMasked: number;
+  strictMasked: number;
+}
 
-  for (const f of files) {
-    const pairs = parsePairsLoose(f.content);
-    pairs.forEach((pair, i) => {
-      pairsScanned += 1;
-      occurrences.push(...scanPair(pair, mode, f.path, i));
-    });
-    if (opts.redactCheck && pairs.length) {
-      // How many occurrences survive each capture-time redact mode?
-      const std = redactBodies(pairs, { mode: "standard" });
-      const strict = redactBodies(pairs, { mode: "strict" });
-      standardMasked += countRedactions(std);
-      strictMasked += countRedactions(strict);
-    }
-  }
-
-  const groups = groupOccurrences(occurrences);
-  const report: AuditReport = {
-    mode,
-    filesScanned: files.length,
-    pairsScanned,
-    groups,
-    totalEgress: occurrences.filter((o) => o.direction === "egress").length,
-    totalResponse: occurrences.filter((o) => o.direction === "response").length,
+function newScanState(opts: { mode?: RedactMode; redactCheck?: boolean }): ScanState {
+  return {
+    mode: opts.mode ?? "standard",
+    redactCheck: opts.redactCheck ?? false,
+    occurrences: [],
+    filesScanned: 0,
+    pairsScanned: 0,
+    standardMasked: 0,
+    strictMasked: 0,
   };
-  if (opts.redactCheck) {
+}
+
+/** Scan ONE pair and fold it into the state — peak memory is one pair. */
+function scanPairInto(st: ScanState, pair: Pairish, file: string, pairIndex: number): void {
+  st.occurrences.push(...scanPair(pair, st.mode, file, pairIndex));
+  st.pairsScanned += 1;
+  if (st.redactCheck) {
+    // How many occurrences would each capture-time redact mode have masked?
+    st.standardMasked += countRedactions(redactBodies([pair], { mode: "standard" }));
+    st.strictMasked += countRedactions(redactBodies([pair], { mode: "strict" }));
+  }
+}
+
+function buildReport(st: ScanState): AuditReport {
+  const report: AuditReport = {
+    mode: st.mode,
+    filesScanned: st.filesScanned,
+    pairsScanned: st.pairsScanned,
+    groups: groupOccurrences(st.occurrences),
+    totalEgress: st.occurrences.filter((o) => o.direction === "egress").length,
+    totalResponse: st.occurrences.filter((o) => o.direction === "response").length,
+  };
+  if (st.redactCheck) {
     report.redactCheck = {
-      standardMasked,
-      strictMasked,
+      standardMasked: st.standardMasked,
+      strictMasked: st.strictMasked,
       total: report.totalEgress + report.totalResponse,
     };
   }
   return report;
+}
+
+/** Audit already-loaded content. For tests and small in-memory inputs. */
+export function auditFiles(
+  files: { path: string; content: string }[],
+  opts: { mode?: RedactMode; redactCheck?: boolean } = {},
+): AuditReport {
+  const st = newScanState(opts);
+  for (const f of files) {
+    st.filesScanned += 1;
+    parsePairsLoose(f.content).forEach((pair, i) => scanPairInto(st, pair, f.path, i));
+  }
+  return buildReport(st);
+}
+
+/**
+ * Audit files from disk, STREAMING line by line. Wire logs embed full request
+ * bodies and can run to gigabytes; whole-file reads OOM the process (V8 heap
+ * limit), so peak memory here is bounded by the longest single line.
+ * Unreadable/deleted files are skipped, never fatal.
+ */
+export async function auditFilePaths(
+  paths: string[],
+  opts: { mode?: RedactMode; redactCheck?: boolean } = {},
+): Promise<AuditReport> {
+  const st = newScanState(opts);
+  for (const p of paths) {
+    try {
+      if (!fs.statSync(p).isFile()) continue;
+    } catch {
+      continue; // moved/deleted since indexing
+    }
+    st.filesScanned += 1;
+    let pairIndex = 0;
+    const rl = readline.createInterface({
+      input: fs.createReadStream(p, { encoding: "utf-8" }),
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of rl) {
+        const t = line.trim();
+        if (!t) continue;
+        let v: unknown;
+        try {
+          v = JSON.parse(t);
+        } catch {
+          continue; // tolerate trailing partial lines (live captures)
+        }
+        if (!v || typeof v !== "object" || !("request" in v || "response" in v)) continue;
+        scanPairInto(st, v as Pairish, p, pairIndex);
+        pairIndex += 1;
+      }
+    } catch {
+      /* read error mid-file — keep what was scanned so far */
+    } finally {
+      rl.close();
+    }
+  }
+  return buildReport(st);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,10 +395,7 @@ export async function runAudit(argv: string[]): Promise<void> {
     else files.push(p);
   }
 
-  const report = auditFiles(
-    files.map((p) => ({ path: p, content: fs.readFileSync(p, "utf-8") })),
-    { mode, redactCheck },
-  );
+  const report = await auditFilePaths(files, { mode, redactCheck });
 
   if (json) {
     console.log(JSON.stringify(report, null, 2));

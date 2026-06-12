@@ -9,7 +9,7 @@ import type { PriceTable } from "../analytics";
 import { loadPrices } from "../pricing";
 import { aggregateUsage, parseWhen } from "../usage";
 import type { Granularity } from "../usage";
-import { auditFiles } from "../audit";
+import { auditFilePaths } from "../audit";
 import type { AuditReport } from "../audit";
 
 /**
@@ -356,7 +356,10 @@ const auditMemo = new Map<string, AuditReport>();
  * Memoized on (mode + per-file content hashes), so repeat dashboard visits
  * are free until a re-index changes a file.
  */
-function auditIndexedFiles(store: Store, mode: "standard" | "strict"): AuditReport {
+async function auditIndexedFiles(
+  store: Store,
+  mode: "standard" | "strict",
+): Promise<AuditReport> {
   const rows = store.db
     .prepare("SELECT source_path AS p, content_hash AS h FROM files ORDER BY source_path")
     .all() as { p: string; h: string }[];
@@ -364,15 +367,8 @@ function auditIndexedFiles(store: Store, mode: "standard" | "strict"): AuditRepo
   const hit = auditMemo.get(memoKey);
   if (hit) return hit;
 
-  const files: { path: string; content: string }[] = [];
-  for (const r of rows) {
-    try {
-      files.push({ path: r.p, content: fs.readFileSync(r.p, "utf-8") });
-    } catch {
-      /* source file moved/deleted since indexing — skip */
-    }
-  }
-  const report = auditFiles(files, { mode, redactCheck: true });
+  // Streamed line-by-line — wire logs can be GBs; never load them whole.
+  const report = await auditFilePaths(rows.map((r) => r.p), { mode, redactCheck: true });
   auditMemo.clear(); // only the latest index state is worth caching
   auditMemo.set(memoKey, report);
   return report;
@@ -616,7 +612,7 @@ export async function handleRequest(
 
     if (pathname === "/api/audit") {
       const mode = q.get("mode") === "strict" ? "strict" : "standard";
-      sendJson(res, 200, auditIndexedFiles(store, mode));
+      sendJson(res, 200, await auditIndexedFiles(store, mode));
       return;
     }
 
@@ -640,9 +636,9 @@ export async function handleRequest(
         return;
       }
       const reportPath = reportPathFor(session.sourcePath);
-      let bytes: Buffer;
+      let size: number;
       try {
-        bytes = fs.readFileSync(reportPath);
+        size = fs.statSync(reportPath).size;
       } catch {
         sendText(
           res,
@@ -653,11 +649,14 @@ export async function handleRequest(
         );
         return;
       }
+      // Reports embed the whole wire log — stream, don't buffer.
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
-        "content-length": bytes.length,
+        "content-length": size,
       });
-      res.end(bytes);
+      const stream = fs.createReadStream(reportPath);
+      stream.on("error", () => res.destroy());
+      stream.pipe(res);
       return;
     }
 

@@ -230,7 +230,7 @@ test("end-to-end CLI: tracetap index + search --json", () => {
   const cliDb = path.join(tmp, "cli-index.db");
   const bin = path.join(ROOT, "dist", "tracetap.js");
 
-  const idxOut = execFileSync("node", [bin, "index", path.join(tmp, "proj"), "--db", cliDb, "--json"], {
+  const idxOut = execFileSync("node", [bin, "index", path.join(tmp, "proj"), "--db", cliDb, "--json", "--offline"], {
     encoding: "utf-8",
   });
   const idx = JSON.parse(idxOut);

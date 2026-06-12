@@ -1,25 +1,40 @@
 import * as http from "http";
 import * as fs from "fs";
+import * as path from "path";
 import { AddressInfo } from "net";
 import { Store, defaultDbPath } from "./index";
-import type { SearchFilters, SessionListFilters } from "./index";
+import type { RequestRow, SearchFilters, SessionListFilters } from "./index";
+import { costForMetrics, priceFor } from "../analytics";
+import type { PriceTable } from "../analytics";
+import { loadPrices } from "../pricing";
+import { aggregateUsage, parseWhen } from "../usage";
+import type { Granularity } from "../usage";
+import { auditFiles } from "../audit";
+import type { AuditReport } from "../audit";
 
 /**
- * `tracetap serve` — a tiny, dependency-light local dashboard over the C5
- * cross-session store. It reads (never writes) the SQLite index and serves a
- * single self-contained HTML page that lists/filters/searches every indexed
- * session, plus a click-through to each session's pre-existing HTML report.
+ * `tracetap serve` — the local observatory over the cross-session store.
+ *
+ * Reads (never writes) the SQLite index and serves a single self-contained
+ * HTML dashboard: sessions, full-text search, per-session deep dive
+ * (transcript + request waterfall + context lanes), usage/spend reports,
+ * fleet analytics, and the system-prompt registry. An SSE endpoint notifies
+ * the page when the index changes (e.g. `tracetap index` ran in another
+ * terminal) so every view live-refreshes.
  *
  * Built on Node's stdlib `http.createServer` only — no express, no SPA
- * framework, no auth, no cloud. The (native) better-sqlite3 dependency rides in
- * via {@link Store}, which is why this module is lazy-loaded from tracetap.ts.
+ * framework, no auth, no cloud. The page is composed at request time from
+ * `frontend/serve/{app.html,app.css,app.js}` into ONE inline document (no
+ * external script/style requests), preserving curl-ability and the
+ * everything-local posture. Prices come from the on-disk cache (or built-ins);
+ * serve itself never touches the network.
  */
 
 const SERVE_HELP = `tracetap serve [options]
 
-Start a local dashboard over the cross-session index (SQLite + FTS5). Lists,
-filters and full-text-searches every indexed session in ONE browser view and
-links through to each session's existing HTML report. Read-only; no cloud.
+Start the local observatory over the cross-session index (SQLite + FTS5):
+sessions, search, per-session waterfalls/transcripts, usage & spend,
+fleet analytics, and the system-prompt registry. Read-only; no cloud.
 
 OPTIONS:
   --port <n>        Port to listen on (default: 4000)
@@ -70,6 +85,303 @@ export function reportPathFor(sourcePath: string): string {
   return sourcePath.replace(/\.jsonl$/i, ".html");
 }
 
+// ---------------------------------------------------------------------------
+// Page composition (frontend/serve/* → one self-contained document)
+// ---------------------------------------------------------------------------
+
+function assetDir(): string {
+  // dist/store/serve.js → ../../frontend/serve (works from src/ in ts-node too).
+  return path.join(__dirname, "..", "..", "frontend", "serve");
+}
+
+/**
+ * Compose the dashboard page: app.html with the CSS and JS inlined. Read per
+ * request (the files are small) so editing the assets needs no server restart.
+ */
+export function composePage(): string {
+  const dir = assetDir();
+  const html = fs.readFileSync(path.join(dir, "app.html"), "utf-8");
+  const css = fs.readFileSync(path.join(dir, "app.css"), "utf-8");
+  const charts = fs.readFileSync(path.join(dir, "charts.js"), "utf-8");
+  const js = fs.readFileSync(path.join(dir, "app.js"), "utf-8");
+  return html
+    .split("/*__TRACETAP_CSS__*/")
+    .join(css)
+    .split("/*__TRACETAP_CHARTS_JS__*/")
+    .join(charts)
+    .split("/*__TRACETAP_JS__*/")
+    .join(js);
+}
+
+// ---------------------------------------------------------------------------
+// Prices (cache/builtin only — serve never fetches)
+// ---------------------------------------------------------------------------
+
+let pricesMemo: { prices: PriceTable; source: string } | null = null;
+
+async function getPrices(): Promise<{ prices: PriceTable; source: string }> {
+  if (!pricesMemo) {
+    const res = await loadPrices({ offline: true });
+    pricesMemo = { prices: res.prices, source: res.source };
+  }
+  return pricesMemo;
+}
+
+// ---------------------------------------------------------------------------
+// Derived analytics
+// ---------------------------------------------------------------------------
+
+function percentile(sorted: number[], q: number): number | null {
+  if (!sorted.length) return null;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/** Compaction points: requests where the resent transcript SHRANK vs the previous call. */
+export function findCompactions(requests: RequestRow[]): { seq: number; from: number; to: number }[] {
+  const out: { seq: number; from: number; to: number }[] = [];
+  for (let i = 1; i < requests.length; i++) {
+    const prev = requests[i - 1].transcriptItems;
+    const cur = requests[i].transcriptItems;
+    if (prev > 0 && cur < prev) out.push({ seq: requests[i].seq, from: prev, to: cur });
+  }
+  return out;
+}
+
+function fleetAnalytics(store: Store, prices: PriceTable) {
+  const sessions = store.listSessions();
+  const events = store.listUsageEvents();
+
+  // Totals + per-agent + daily trend, re-priced from raw tokens.
+  const totals = {
+    sessions: sessions.length,
+    requests: 0,
+    erroredRequests: 0,
+    events: events.length,
+    costUsd: 0,
+    hasUnpriced: false,
+    promptTokens: 0,
+    completionTokens: 0,
+    cacheRead: 0,
+    cacheCreation: 0,
+    cacheHitRate: 0,
+  };
+  const perAgent = new Map<
+    string,
+    { agent: string; sessions: Set<string>; costUsd: number; promptTokens: number; completionTokens: number }
+  >();
+  const perProject = new Map<
+    string,
+    { project: string; sessions: Set<string>; costUsd: number; events: number; completionTokens: number }
+  >();
+  const trendByDay = new Map<string, { date: string; costUsd: number; events: number }>();
+
+  for (const ev of events) {
+    const price = ev.model ? priceFor(ev.model, prices) : null;
+    const cost = price
+      ? costForMetrics(
+          {
+            promptTokens: ev.promptTokens,
+            completionTokens: ev.completionTokens,
+            cacheCreationTokens: ev.cacheCreation,
+            cacheReadTokens: ev.cacheRead,
+          },
+          price,
+        )
+      : ev.costUsd;
+    if (cost == null) totals.hasUnpriced = true;
+    else totals.costUsd += cost;
+    totals.promptTokens += ev.promptTokens;
+    totals.completionTokens += ev.completionTokens;
+    totals.cacheRead += ev.cacheRead;
+    totals.cacheCreation += ev.cacheCreation;
+
+    let pa = perAgent.get(ev.agent);
+    if (!pa) {
+      pa = { agent: ev.agent, sessions: new Set(), costUsd: 0, promptTokens: 0, completionTokens: 0 };
+      perAgent.set(ev.agent, pa);
+    }
+    pa.sessions.add(ev.sessionId);
+    if (cost != null) pa.costUsd += cost;
+    pa.promptTokens += ev.promptTokens;
+    pa.completionTokens += ev.completionTokens;
+
+    const projKey = ev.projectCwd || "(unknown)";
+    let pp = perProject.get(projKey);
+    if (!pp) {
+      pp = { project: projKey, sessions: new Set(), costUsd: 0, events: 0, completionTokens: 0 };
+      perProject.set(projKey, pp);
+    }
+    pp.sessions.add(ev.sessionId);
+    if (cost != null) pp.costUsd += cost;
+    pp.events += 1;
+    pp.completionTokens += ev.completionTokens;
+
+    if (ev.ts > 0) {
+      const date = new Date(ev.ts * 1000).toISOString().slice(0, 10);
+      let day = trendByDay.get(date);
+      if (!day) {
+        day = { date, costUsd: 0, events: 0 };
+        trendByDay.set(date, day);
+      }
+      if (cost != null) day.costUsd += cost;
+      day.events += 1;
+    }
+  }
+  const inputSide = totals.promptTokens + totals.cacheCreation + totals.cacheRead;
+  totals.cacheHitRate = inputSide > 0 ? totals.cacheRead / inputSide : 0;
+
+  // Per-model wire metrics straight from the requests table.
+  const reqRows = store.db
+    .prepare(
+      `SELECT model, errored, ttft_ms AS ttft, duration_ms AS dur, completion_tokens AS outTok
+       FROM requests`,
+    )
+    .all() as { model: string; errored: number; ttft: number | null; dur: number | null; outTok: number }[];
+  const perModelMap = new Map<
+    string,
+    { model: string; requests: number; errored: number; ttfts: number[]; durs: number[]; completionTokens: number }
+  >();
+  for (const r of reqRows) {
+    totals.requests += 1;
+    if (r.errored) totals.erroredRequests += 1;
+    const key = r.model || "(unknown)";
+    let pm = perModelMap.get(key);
+    if (!pm) {
+      pm = { model: key, requests: 0, errored: 0, ttfts: [], durs: [], completionTokens: 0 };
+      perModelMap.set(key, pm);
+    }
+    pm.requests += 1;
+    if (r.errored) pm.errored += 1;
+    if (r.ttft != null) pm.ttfts.push(r.ttft);
+    if (r.dur != null) pm.durs.push(r.dur);
+    pm.completionTokens += r.outTok || 0;
+  }
+  const perModel = [...perModelMap.values()]
+    .map((pm) => {
+      pm.ttfts.sort((a, b) => a - b);
+      pm.durs.sort((a, b) => a - b);
+      return {
+        model: pm.model,
+        requests: pm.requests,
+        errored: pm.errored,
+        errorRate: pm.requests ? pm.errored / pm.requests : 0,
+        ttftP50: percentile(pm.ttfts, 0.5),
+        ttftP95: percentile(pm.ttfts, 0.95),
+        // Distribution band for the strip chart: p10/p25/p50/p75/p90/p95.
+        ttftPcts: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95].map((q) => percentile(pm.ttfts, q)),
+        ttftN: pm.ttfts.length,
+        durP50: percentile(pm.durs, 0.5),
+        completionTokens: pm.completionTokens,
+      };
+    })
+    .sort((a, b) => b.requests - a.requests);
+
+  // Fleet-wide tool histogram from the per-session rollups.
+  const toolCounts = new Map<string, number>();
+  for (const s of sessions) {
+    for (const [name, count] of Object.entries(s.toolHistogram)) {
+      toolCounts.set(name, (toolCounts.get(name) ?? 0) + count);
+    }
+  }
+  const topTools = [...toolCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+
+  // Mid-task compactions: transcript shrank between consecutive calls.
+  const compactionRow = store.db
+    .prepare(
+      `SELECT COUNT(*) AS total, COUNT(DISTINCT session_id) AS sessions FROM (
+         SELECT session_id,
+                transcript_items - LAG(transcript_items)
+                  OVER (PARTITION BY session_id ORDER BY seq) AS delta
+         FROM requests
+       ) WHERE delta < 0`,
+    )
+    .get() as { total: number; sessions: number };
+
+  const topSessions = [...sessions]
+    .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0))
+    .slice(0, 8)
+    .map((s) => ({
+      sessionId: s.sessionId,
+      agent: s.agent,
+      model: s.model,
+      projectCwd: s.projectCwd,
+      startedAt: s.startedAt,
+      durationMs: s.durationMs,
+      costUsd: s.costUsd,
+      turns: s.turns,
+      errorCount: s.errorCount,
+    }));
+
+  return {
+    totals,
+    perAgent: [...perAgent.values()]
+      .map((pa) => ({
+        agent: pa.agent,
+        sessions: pa.sessions.size,
+        costUsd: pa.costUsd,
+        promptTokens: pa.promptTokens,
+        completionTokens: pa.completionTokens,
+      }))
+      .sort((a, b) => b.costUsd - a.costUsd),
+    perModel,
+    perProject: [...perProject.values()]
+      .map((pp) => ({
+        project: pp.project,
+        sessions: pp.sessions.size,
+        costUsd: pp.costUsd,
+        events: pp.events,
+        completionTokens: pp.completionTokens,
+      }))
+      .sort((a, b) => b.costUsd - a.costUsd),
+    topTools,
+    // 26 weeks of daily buckets — feeds the calendar heatmap.
+    trend: [...trendByDay.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-182),
+    compactions: { totalCompactions: compactionRow.total, sessionsWithCompaction: compactionRow.sessions },
+    topSessions,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Audit (memoized per file content hash)
+// ---------------------------------------------------------------------------
+
+const auditMemo = new Map<string, AuditReport>();
+
+/**
+ * Run the egress-secret audit over every source file the index knows about.
+ * Memoized on (mode + per-file content hashes), so repeat dashboard visits
+ * are free until a re-index changes a file.
+ */
+function auditIndexedFiles(store: Store, mode: "standard" | "strict"): AuditReport {
+  const rows = store.db
+    .prepare("SELECT source_path AS p, content_hash AS h FROM files ORDER BY source_path")
+    .all() as { p: string; h: string }[];
+  const memoKey = mode + "|" + rows.map((r) => r.p + ":" + r.h).join("|");
+  const hit = auditMemo.get(memoKey);
+  if (hit) return hit;
+
+  const files: { path: string; content: string }[] = [];
+  for (const r of rows) {
+    try {
+      files.push({ path: r.p, content: fs.readFileSync(r.p, "utf-8") });
+    } catch {
+      /* source file moved/deleted since indexing — skip */
+    }
+  }
+  const report = auditFiles(files, { mode, redactCheck: true });
+  auditMemo.clear(); // only the latest index state is worth caching
+  auditMemo.set(memoKey, report);
+  return report;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP plumbing
+// ---------------------------------------------------------------------------
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -100,11 +412,55 @@ function firstParam(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+// SSE: notify connected dashboards when the index database changes on disk.
+// Polling the file mtimes (db + WAL) is the simplest reliable signal — fs.watch
+// misses WAL checkpoint writes on some platforms.
+const SSE_POLL_MS = 1500;
+
+function dbMtimeSignature(dbPath: string): string {
+  let sig = "";
+  for (const p of [dbPath, dbPath + "-wal"]) {
+    try {
+      const st = fs.statSync(p);
+      sig += `${st.mtimeMs}:${st.size};`;
+    } catch {
+      sig += "x;";
+    }
+  }
+  return sig;
+}
+
+function handleEvents(store: Store, res: http.ServerResponse): void {
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+  });
+  res.write("retry: 2000\n\n");
+  res.write(`event: hello\ndata: {"db":${JSON.stringify(store.dbPath)}}\n\n`);
+
+  let last = dbMtimeSignature(store.dbPath);
+  const timer = setInterval(() => {
+    const sig = dbMtimeSignature(store.dbPath);
+    if (sig !== last) {
+      last = sig;
+      res.write(`event: change\ndata: {"at":${Date.now()}}\n\n`);
+    } else {
+      res.write(": ping\n\n");
+    }
+  }, SSE_POLL_MS);
+  res.on("close", () => clearInterval(timer));
+}
+
 /**
  * Route a single request against the store. Exported so tests can drive the
  * handler without binding a socket; {@link runServe} wraps it in an http server.
  */
-export function handleRequest(store: Store, req: http.IncomingMessage, res: http.ServerResponse): void {
+export async function handleRequest(
+  store: Store,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
   let url: URL;
   try {
     url = new URL(req.url || "/", "http://localhost");
@@ -122,7 +478,19 @@ export function handleRequest(store: Store, req: http.IncomingMessage, res: http
 
   try {
     if (pathname === "/" || pathname === "/index.html") {
-      sendHtml(res, 200, PAGE_HTML);
+      sendHtml(res, 200, composePage());
+      return;
+    }
+
+    if (pathname === "/api/meta") {
+      const counts = {
+        sessions: (store.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as any).n,
+        requests: (store.db.prepare("SELECT COUNT(*) AS n FROM requests").get() as any).n,
+        prompts: (store.db.prepare("SELECT COUNT(*) AS n FROM prompts").get() as any).n,
+        events: (store.db.prepare("SELECT COUNT(*) AS n FROM usage_events").get() as any).n,
+      };
+      const { source } = await getPrices();
+      sendJson(res, 200, { dbPath: store.dbPath, counts, priceSource: source });
       return;
     }
 
@@ -131,15 +499,22 @@ export function handleRequest(store: Store, req: http.IncomingMessage, res: http
       const agent = firstParam(q.get("agent") ?? undefined);
       const model = firstParam(q.get("model") ?? undefined);
       const project = firstParam(q.get("project") ?? undefined);
+      const tool = firstParam(q.get("tool") ?? undefined);
       const sort = firstParam(q.get("sort") ?? undefined);
       const order = firstParam(q.get("order") ?? undefined);
       const limit = firstParam(q.get("limit") ?? undefined);
+      const since = firstParam(q.get("since") ?? undefined);
+      const until = firstParam(q.get("until") ?? undefined);
       if (agent) filters.agent = agent;
       if (model) filters.model = model;
       if (project) filters.project = project;
+      if (tool) filters.tool = tool;
+      if (q.get("errored") === "1" || q.get("errored") === "true") filters.errored = true;
       if (sort) filters.sort = sort;
       if (order === "asc" || order === "desc") filters.order = order;
       if (limit && Number.isFinite(Number(limit))) filters.limit = Number(limit);
+      if (since && Number.isFinite(Number(since))) filters.since = Number(since);
+      if (until && Number.isFinite(Number(until))) filters.until = Number(until);
       const sessions = store.listSessions(filters);
       sendJson(res, 200, { count: sessions.length, sessions });
       return;
@@ -167,6 +542,86 @@ export function handleRequest(store: Store, req: http.IncomingMessage, res: http
       }
       const hits = store.search(query, filters);
       sendJson(res, 200, { query, count: hits.length, hits });
+      return;
+    }
+
+    if (pathname.startsWith("/api/session/")) {
+      const sessionId = decodeURIComponent(pathname.slice("/api/session/".length));
+      const session = store.getSession(sessionId);
+      if (!session) {
+        sendJson(res, 404, { error: `No indexed session '${sessionId}'.` });
+        return;
+      }
+      const steps = store.listSteps(sessionId);
+      const requests = store.listRequests(sessionId);
+      sendJson(res, 200, {
+        session,
+        steps,
+        requests,
+        compactions: findCompactions(requests),
+        reportAvailable: fs.existsSync(reportPathFor(session.sourcePath)),
+      });
+      return;
+    }
+
+    if (pathname === "/api/usage") {
+      const g = firstParam(q.get("granularity") ?? undefined) ?? "daily";
+      const granularity: Granularity =
+        g === "weekly" || g === "monthly" || g === "total" ? g : "daily";
+      const filters: { since?: number; until?: number; agent?: string; model?: string; project?: string } = {};
+      const since = firstParam(q.get("since") ?? undefined);
+      const until = firstParam(q.get("until") ?? undefined);
+      const agent = firstParam(q.get("agent") ?? undefined);
+      const model = firstParam(q.get("model") ?? undefined);
+      const project = firstParam(q.get("project") ?? undefined);
+      if (since) filters.since = parseWhen(since);
+      if (until) filters.until = parseWhen(until, { endOfDay: true });
+      if (agent) filters.agent = agent;
+      if (model) filters.model = model;
+      if (project) filters.project = project;
+      const breakdown = q.get("breakdown") === "1" || q.get("breakdown") === "true";
+      const timeZone = firstParam(q.get("timezone") ?? undefined);
+
+      const { prices, source } = await getPrices();
+      const events = store.listUsageEvents(filters);
+      const report = aggregateUsage(events, { granularity, breakdown, timeZone, prices });
+      report.priceSource = source;
+      sendJson(res, 200, report);
+      return;
+    }
+
+    if (pathname === "/api/analytics") {
+      const { prices, source } = await getPrices();
+      sendJson(res, 200, { ...fleetAnalytics(store, prices), priceSource: source });
+      return;
+    }
+
+    if (pathname === "/api/prompts") {
+      const agent = firstParam(q.get("agent") ?? undefined);
+      const prompts = store.listPrompts(agent ? { agent } : {});
+      sendJson(res, 200, { count: prompts.length, prompts });
+      return;
+    }
+
+    if (pathname.startsWith("/api/prompt/")) {
+      const hash = decodeURIComponent(pathname.slice("/api/prompt/".length));
+      const prompt = store.getPrompt(hash);
+      if (!prompt) {
+        sendJson(res, 404, { error: `No prompt '${hash}'.` });
+        return;
+      }
+      sendJson(res, 200, prompt);
+      return;
+    }
+
+    if (pathname === "/api/audit") {
+      const mode = q.get("mode") === "strict" ? "strict" : "standard";
+      sendJson(res, 200, auditIndexedFiles(store, mode));
+      return;
+    }
+
+    if (pathname === "/api/events") {
+      handleEvents(store, res);
       return;
     }
 
@@ -208,7 +663,11 @@ export function handleRequest(store: Store, req: http.IncomingMessage, res: http
 
     sendText(res, 404, "Not found.");
   } catch (err) {
-    sendText(res, 500, `Internal error: ${(err as Error).message}`);
+    if (!res.headersSent) {
+      sendText(res, 500, `Internal error: ${(err as Error).message}`);
+    } else {
+      res.end();
+    }
   }
 }
 
@@ -222,7 +681,9 @@ export async function runServe(argv: string[]): Promise<void> {
   const opts = parseServeArgs(argv);
   const store = new Store(opts.dbPath);
 
-  const server = http.createServer((req, res) => handleRequest(store, req, res));
+  const server = http.createServer((req, res) => {
+    void handleRequest(store, req, res);
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -244,254 +705,3 @@ export async function runServe(argv: string[]): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }
-
-// ---------------------------------------------------------------------------
-// The dashboard page (self-contained: inline CSS + JS, no external deps).
-// ---------------------------------------------------------------------------
-
-const PAGE_HTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>tracetap — sessions</title>
-<style>
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    color: #1c1e21; background: #fafbfc;
-  }
-  header { padding: 16px 20px; border-bottom: 1px solid #e3e6ea; background: #fff; }
-  h1 { margin: 0; font-size: 18px; font-weight: 600; }
-  h1 small { color: #6b7280; font-weight: 400; font-size: 13px; margin-left: 8px; }
-  .controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px; align-items: center; }
-  .controls input {
-    padding: 6px 10px; border: 1px solid #cfd4da; border-radius: 6px; font: inherit; background: #fff; color: inherit;
-  }
-  #q { flex: 1 1 280px; min-width: 200px; }
-  .filter { width: 150px; }
-  .meta { padding: 4px 20px 12px; color: #6b7280; font-size: 13px; }
-  table { width: 100%; border-collapse: collapse; }
-  thead th {
-    position: sticky; top: 0; background: #f1f3f5; text-align: left; padding: 8px 12px; font-weight: 600;
-    border-bottom: 1px solid #d7dbe0; cursor: pointer; white-space: nowrap; user-select: none;
-  }
-  thead th .arrow { color: #9aa1aa; font-size: 11px; }
-  tbody td { padding: 8px 12px; border-bottom: 1px solid #eceef1; vertical-align: top; }
-  tbody tr:hover { background: #f6f8fa; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  a { color: #1a73e8; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; background: #eef1f4; font-size: 12px; }
-  .tools { color: #555; font-size: 12px; max-width: 280px; }
-  .snippet { color: #444; font-size: 13px; }
-  .snippet b { background: #fff3bf; font-weight: 600; }
-  .errored { color: #c92a2a; }
-  .empty { padding: 28px 20px; color: #6b7280; }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6e8eb; background: #16181c; }
-    header, .controls input { background: #1f2329; }
-    header { border-color: #2b2f36; }
-    thead th { background: #232830; border-color: #353b44; }
-    tbody td { border-color: #2b2f36; }
-    tbody tr:hover { background: #1f242b; }
-    .pill { background: #2b313a; }
-    .tools, .snippet { color: #aab1bb; }
-  }
-</style>
-</head>
-<body>
-<header>
-  <h1>tracetap <small>cross-session dashboard</small></h1>
-</header>
-<div class="controls">
-  <input id="q" type="search" placeholder="Full-text search across all sessions (FTS5)…" />
-  <input id="f-agent" class="filter" type="text" placeholder="agent" />
-  <input id="f-model" class="filter" type="text" placeholder="model" />
-  <input id="f-project" class="filter" type="text" placeholder="project" />
-</div>
-<div class="meta" id="meta">Loading…</div>
-<table id="tbl">
-  <thead>
-    <tr id="head"></tr>
-  </thead>
-  <tbody id="rows"></tbody>
-</table>
-<div class="empty" id="empty" style="display:none"></div>
-
-<script>
-(function () {
-  var COLS = [
-    { key: "agent", label: "Agent" },
-    { key: "model", label: "Model" },
-    { key: "started_at", label: "Started", get: function (s) { return s.startedAt; } },
-    { key: "duration_ms", label: "Duration", get: function (s) { return s.durationMs; } },
-    { key: "total_in_tokens", label: "In", get: function (s) { return s.totalInTokens; }, num: true },
-    { key: "total_out_tokens", label: "Out", get: function (s) { return s.totalOutTokens; }, num: true },
-    { key: "cost_usd", label: "Cost", get: function (s) { return s.costUsd; }, num: true },
-    { key: "tools", label: "Tools" }
-  ];
-  var sort = "started_at", order = "desc";
-  var searchMode = false, searchHits = [];
-
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-    });
-  }
-  function fmtTime(epoch) {
-    if (!epoch) return "";
-    var d = new Date(epoch * 1000);
-    return d.toISOString().slice(0, 16).replace("T", " ");
-  }
-  function fmtDur(ms) {
-    if (!ms) return "";
-    var s = ms / 1000;
-    if (s < 60) return s.toFixed(1) + "s";
-    var m = Math.floor(s / 60); var rem = Math.round(s % 60);
-    return m + "m" + (rem ? " " + rem + "s" : "");
-  }
-  function fmtCost(c) { return c == null ? "" : "$" + Number(c).toFixed(4); }
-  function fmtTools(h) {
-    if (!h) return "";
-    var keys = Object.keys(h);
-    if (!keys.length) return "";
-    keys.sort(function (a, b) { return h[b] - h[a]; });
-    return keys.slice(0, 6).map(function (k) { return esc(k) + "×" + h[k]; }).join(", ")
-      + (keys.length > 6 ? " …" : "");
-  }
-  function reportLink(id, label) {
-    return '<a href="/report?session=' + encodeURIComponent(id) + '" target="_blank" rel="noopener">' + label + "</a>";
-  }
-
-  function renderHead() {
-    var html = "";
-    COLS.forEach(function (c) {
-      var arrow = "";
-      if (c.key === sort) arrow = ' <span class="arrow">' + (order === "asc" ? "▲" : "▼") + "</span>";
-      html += '<th data-key="' + c.key + '">' + esc(c.label) + arrow + "</th>";
-    });
-    document.getElementById("head").innerHTML = html;
-    Array.prototype.forEach.call(document.querySelectorAll("th[data-key]"), function (th) {
-      th.addEventListener("click", function () {
-        var key = th.getAttribute("data-key");
-        if (key === "tools") return;
-        if (sort === key) order = order === "asc" ? "desc" : "asc";
-        else { sort = key; order = "desc"; }
-        loadSessions();
-      });
-    });
-  }
-
-  function renderSessions(sessions) {
-    var rows = document.getElementById("rows");
-    var empty = document.getElementById("empty");
-    if (!sessions.length) {
-      rows.innerHTML = "";
-      empty.style.display = "block";
-      empty.textContent = "No indexed sessions. Run 'tracetap index' first.";
-      return;
-    }
-    empty.style.display = "none";
-    var html = "";
-    sessions.forEach(function (s) {
-      html += "<tr>";
-      html += "<td>" + reportLink(s.sessionId, esc(s.agent) || "—") + "</td>";
-      html += "<td>" + esc(s.model) + "</td>";
-      html += "<td>" + esc(fmtTime(s.startedAt)) + "</td>";
-      html += '<td class="num">' + esc(fmtDur(s.durationMs)) + "</td>";
-      html += '<td class="num">' + (s.totalInTokens || 0).toLocaleString() + "</td>";
-      html += '<td class="num">' + (s.totalOutTokens || 0).toLocaleString() + "</td>";
-      html += '<td class="num">' + esc(fmtCost(s.costUsd)) + "</td>";
-      html += '<td class="tools">' + fmtTools(s.toolHistogram) + "</td>";
-      html += "</tr>";
-    });
-    rows.innerHTML = html;
-  }
-
-  function renderHits(hits, query) {
-    var rows = document.getElementById("rows");
-    var empty = document.getElementById("empty");
-    if (!hits.length) {
-      rows.innerHTML = "";
-      empty.style.display = "block";
-      empty.textContent = "No matches for “" + query + "”.";
-      return;
-    }
-    empty.style.display = "none";
-    var html = "";
-    hits.forEach(function (h) {
-      var snip = esc(h.snippet).replace(/\\[([^\\]]*)\\]/g, "<b>$1</b>");
-      html += "<tr>";
-      html += "<td>" + reportLink(h.sessionId, esc(h.agent) || "—")
-        + ' <span class="pill">#' + esc(h.stepIndex) + "</span>"
-        + (h.errored ? ' <span class="errored">errored</span>' : "") + "</td>";
-      html += "<td>" + esc(h.model) + "</td>";
-      html += '<td colspan="5"><div class="snippet">' + snip + "</div>"
-        + (h.toolName ? '<div class="tools">↳ ' + esc(h.toolName) + "</div>" : "") + "</td>";
-      html += '<td class="tools">' + esc(fmtTime(h.startedAt)) + "</td>";
-      html += "</tr>";
-    });
-    rows.innerHTML = html;
-  }
-
-  function qs() {
-    var p = new URLSearchParams();
-    var a = document.getElementById("f-agent").value.trim();
-    var m = document.getElementById("f-model").value.trim();
-    var pr = document.getElementById("f-project").value.trim();
-    if (a) p.set("agent", a);
-    if (m) p.set("model", m);
-    if (pr) p.set("project", pr);
-    return p;
-  }
-
-  function loadSessions() {
-    searchMode = false;
-    renderHead();
-    var p = qs();
-    p.set("sort", sort);
-    p.set("order", order);
-    fetch("/api/sessions?" + p.toString()).then(function (r) { return r.json(); }).then(function (data) {
-      document.getElementById("meta").textContent = data.count + " session" + (data.count === 1 ? "" : "s");
-      renderSessions(data.sessions);
-    }).catch(function (e) {
-      document.getElementById("meta").textContent = "Error: " + e;
-    });
-  }
-
-  function runSearch(query) {
-    searchMode = true;
-    var p = qs();
-    p.set("q", query);
-    fetch("/api/search?" + p.toString()).then(function (r) { return r.json(); }).then(function (data) {
-      document.getElementById("meta").textContent =
-        data.count + " hit" + (data.count === 1 ? "" : "s") + " for “" + query + "”";
-      renderHits(data.hits, query);
-    }).catch(function (e) {
-      document.getElementById("meta").textContent = "Error: " + e;
-    });
-  }
-
-  var t;
-  function onChange() {
-    clearTimeout(t);
-    t = setTimeout(function () {
-      var query = document.getElementById("q").value.trim();
-      if (query) runSearch(query);
-      else loadSessions();
-    }, 180);
-  }
-
-  document.getElementById("q").addEventListener("input", onChange);
-  document.getElementById("f-agent").addEventListener("input", onChange);
-  document.getElementById("f-model").addEventListener("input", onChange);
-  document.getElementById("f-project").addEventListener("input", onChange);
-
-  renderHead();
-  loadSessions();
-})();
-</script>
-</body>
-</html>`;

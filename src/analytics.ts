@@ -137,7 +137,8 @@ export function priceFor(model: string, prices: PriceTable = DEFAULT_PRICES): Mo
   return best ? best.price : null;
 }
 
-function costForMetrics(
+/** USD cost of a set of token counts under a resolved {@link ModelPrice}. */
+export function costForMetrics(
   m: { promptTokens: number; completionTokens: number; cacheCreationTokens: number; cacheReadTokens: number },
   price: ModelPrice,
 ): number {

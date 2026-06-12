@@ -81,7 +81,8 @@ test("GET / returns a self-contained HTML page", async () => {
   assert.match(r.contentType, /text\/html/);
   assert.match(r.text, /<!doctype html>/i);
   assert.match(r.text, /tracetap/);
-  // self-contained: inline styles + script, no external <link>/<script src>.
+  // Self-contained where it matters: inline styles + scripts. (Font <link>s
+  // are progressive enhancement with ui-monospace fallbacks — page works offline.)
   assert.match(r.text, /<style>/);
   assert.match(r.text, /\/api\/sessions/);
   assert.ok(!/<script[^>]+src=/.test(r.text), "page must not load external scripts");
@@ -157,4 +158,126 @@ test("unknown route 404s and non-GET is rejected", async () => {
 
   const res = await fetch(baseUrl + "/api/sessions", { method: "POST" });
   assert.equal(res.status, 405);
+});
+
+// ---------------------------------------------------------------------------
+// v2 observatory APIs
+// ---------------------------------------------------------------------------
+
+test("GET / carries the observatory shell (tabs + inlined assets)", async () => {
+  const r = await get("/");
+  assert.match(r.text, /id="tabs"/);
+  assert.match(r.text, /#analytics/);
+  assert.match(r.text, /\/api\/events/, "SSE client must be wired in");
+});
+
+test("GET /api/meta reports db counts and price source", async () => {
+  const r = await get("/api/meta");
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.ok(body.counts.sessions >= 2);
+  assert.ok(body.counts.requests >= 3, "wire-level request rows expected");
+  assert.ok(body.counts.prompts >= 1);
+  assert.ok(["litellm", "litellm-cache", "builtin"].includes(body.priceSource));
+});
+
+test("GET /api/session/<id> returns transcript, requests, compactions", async () => {
+  const list = JSON.parse((await get("/api/sessions?agent=claude")).text);
+  const id = list.sessions[0].sessionId;
+  const r = await get("/api/session/" + encodeURIComponent(id));
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.equal(body.session.sessionId, id);
+  assert.ok(body.steps.length >= 3, "transcript steps expected");
+  assert.ok(body.requests.length >= 2, "per-pair wire rows expected");
+  assert.equal(body.requests[0].seq, 0);
+  assert.ok(Array.isArray(body.compactions));
+  assert.equal(typeof body.reportAvailable, "boolean");
+
+  const missing = await get("/api/session/nope");
+  assert.equal(missing.status, 404);
+});
+
+test("GET /api/usage aggregates priced buckets", async () => {
+  const r = await get("/api/usage?granularity=daily&timezone=UTC");
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.ok(body.rows.length >= 1);
+  assert.equal(body.granularity, "daily");
+  assert.ok(body.totals.events >= 2);
+  assert.ok(body.totals.costUsd > 0, "fixture models are priced");
+
+  const breakdown = JSON.parse((await get("/api/usage?granularity=total&breakdown=1")).text);
+  assert.ok(breakdown.rows.length >= 2, "per-model rows expected");
+  assert.ok(breakdown.rows.every((row) => row.group));
+});
+
+test("GET /api/analytics returns fleet rollups with wire metrics", async () => {
+  const r = await get("/api/analytics");
+  assert.equal(r.status, 200);
+  const a = JSON.parse(r.text);
+  assert.ok(a.totals.sessions >= 2);
+  assert.ok(a.totals.requests >= 3);
+  assert.ok(a.perModel.length >= 2);
+  for (const m of a.perModel) {
+    assert.ok(m.requests >= 1);
+    assert.ok(m.errorRate >= 0 && m.errorRate <= 1);
+  }
+  assert.ok(a.perAgent.length >= 2);
+  assert.ok(Array.isArray(a.topTools) && a.topTools.length >= 1);
+  assert.ok(a.compactions.totalCompactions >= 0);
+  assert.ok(a.topSessions.length >= 1);
+
+  // UI feeds: project rollup + TTFT distribution bands.
+  assert.ok(Array.isArray(a.perProject) && a.perProject.length >= 1);
+  for (const p of a.perProject) {
+    assert.equal(typeof p.project, "string");
+    assert.ok(p.sessions >= 1 && p.events >= 1);
+  }
+  for (const m of a.perModel) {
+    assert.equal(m.ttftPcts.length, 6);
+    assert.equal(typeof m.ttftN, "number");
+  }
+});
+
+test("GET /api/prompts + /api/prompt/<hash> expose the registry", async () => {
+  const r = await get("/api/prompts");
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.text);
+  assert.ok(body.count >= 1);
+  const first = body.prompts[0];
+  assert.equal(first.promptHash.length, 64);
+  assert.ok(first.requestCount >= 1);
+
+  const detail = JSON.parse((await get("/api/prompt/" + first.promptHash.slice(0, 10))).text);
+  assert.equal(detail.promptHash, first.promptHash);
+  assert.ok(detail.content.length > 0);
+  assert.ok(Array.isArray(detail.sessionIds) && detail.sessionIds.length >= 1);
+
+  const missing = await get("/api/prompt/ffffffffffff");
+  assert.equal(missing.status, 404);
+});
+
+test("GET /api/events is a live SSE stream", async () => {
+  const ac = new AbortController();
+  const res = await fetch(baseUrl + "/api/events", { signal: ac.signal });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /text\/event-stream/);
+  const reader = res.body.getReader();
+  const { value } = await reader.read();
+  const text = new TextDecoder().decode(value);
+  assert.match(text, /event: hello/);
+  ac.abort();
+});
+
+test("GET /api/audit scans indexed source files (memoized)", async () => {
+  const r = await get("/api/audit");
+  assert.equal(r.status, 200);
+  const report = JSON.parse(r.text);
+  assert.ok(report.filesScanned >= 1);
+  assert.ok(report.pairsScanned >= 3);
+  assert.ok(Array.isArray(report.groups));
+  assert.ok(report.redactCheck, "serve audit always includes redact-check");
+  const strict = JSON.parse((await get("/api/audit?mode=strict")).text);
+  assert.equal(strict.mode, "strict");
 });

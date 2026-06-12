@@ -98,7 +98,14 @@ export class GeminiAdapter implements AgentAdapter {
       usage: merged.usage,
       model: merged.model,
       status,
+      stopReason: merged.finishReason,
     };
+  }
+
+  systemPromptText(pair: RawPair): string | null {
+    const body = pair?.request?.body ?? {};
+    const text = systemInstructionToText(body.systemInstruction ?? body.system_instruction);
+    return text.trim() ? text : null;
   }
 }
 
@@ -226,6 +233,7 @@ interface MergedResponse {
   content: any;
   usage: NormalizedUsage | null;
   model?: string;
+  finishReason?: string;
 }
 
 /**
@@ -238,6 +246,7 @@ function mergeChunks(chunks: any[]): MergedResponse {
   const parts: any[] = [];
   let usageRaw: any = null;
   let model: string | undefined;
+  let finishReason: string | undefined;
 
   for (const chunk of chunks) {
     if (!chunk || typeof chunk !== "object") continue;
@@ -245,6 +254,9 @@ function mergeChunks(chunks: any[]): MergedResponse {
     if (typeof chunk.modelVersion === "string") model = chunk.modelVersion;
 
     const candidate = Array.isArray(chunk.candidates) ? chunk.candidates[0] : null;
+    if (candidate && typeof candidate.finishReason === "string") {
+      finishReason = candidate.finishReason;
+    }
     const content = candidate && candidate.content;
     const cParts: any[] = content && Array.isArray(content.parts) ? content.parts : [];
     for (const part of cParts) {
@@ -270,6 +282,7 @@ function mergeChunks(chunks: any[]): MergedResponse {
     content: { role: "model", parts },
     usage: normalizeUsage(usageRaw),
     model,
+    finishReason,
   };
 }
 
